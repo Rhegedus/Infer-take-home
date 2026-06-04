@@ -15,7 +15,8 @@
  * │    │                                                            │
  * │    ├─ openBrowser()  ──► Browserless CDP (WebSocket)            │
  * │    ├─ login()        ──► Subclass impl                          │
- * │    ├─ triggerMfa()   ──► Subclass impl                          │
+ * │    ├─ detectMfa()    ──► Subclass impl (repeatable checkpoints) │
+ * │    ├─ navigateToDocumentsArea() ──► Subclass impl               │
  * │    ├─ awaitMfaCode() ──► polls Redis every N ms                 │
  * │    ├─ submitMfa()    ──► Subclass impl                          │
  * │    └─ fetchDocuments()──► Subclass impl                         │
@@ -43,7 +44,7 @@
  *
  * 1. Create `lib/carriers/impl/{carrier-id}-carrier.ts`
  * 2. `extends BaseCarrier`
- * 3. Implement the five abstract methods
+ * 3. Implement the six abstract methods
  * 4. Register in your carrier registry / factory
  */
 

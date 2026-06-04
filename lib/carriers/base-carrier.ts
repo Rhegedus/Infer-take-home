@@ -2,6 +2,7 @@ import puppeteer, { Browser, Page } from "puppeteer-core";
 import { Redis } from "@upstash/redis";
 import { randomUUID } from "crypto";
 
+import { browserlessWsWithLaunch } from "../browserless-endpoint";
 import { SessionStore } from "./session-store";
 import {
   CarrierConfig,
@@ -25,7 +26,8 @@ import {
  * Subclasses MUST implement:
  * - `carrierId`          – unique string identifier (e.g. "cigna", "aetna")
  * - `login(page)`        – navigate to the portal and authenticate
- * - `triggerMfa(page)`   – initiate MFA challenge on the portal (Returns boolean for conditional MFA)
+ * - `detectMfa(page)`    – return true when an OTP/MFA screen is showing (may send code)
+ * - `navigateToDocumentsArea(page)` – post-auth navigation toward policy documents
  * - `submitMfa(page, code)` – type/submit the MFA code in the browser
  * - `fetchDocuments(page)`  – scrape / download documents after auth
  */
@@ -37,6 +39,7 @@ export abstract class BaseCarrier {
   protected readonly redis: Redis;
 
   private browser: Browser | null = null;
+  private currentSessionId: string | null = null;
 
   constructor(redis: Redis, config: CarrierConfig) {
     const merged: Required<CarrierConfig> = {
@@ -65,6 +68,7 @@ export abstract class BaseCarrier {
       sessionId,
       carrierId: this.carrierId,
       state: CarrierState.INITIALIZED,
+      statusMessage: "Starting session…",
       updatedAt: Date.now(),
     };
 
@@ -101,45 +105,72 @@ export abstract class BaseCarrier {
     sessionId: string,
     credentials: Record<string, string>
   ): Promise<DocumentResult> {
+    this.currentSessionId = sessionId;
+    try {
+      return await this.runPipeline(sessionId, credentials);
+    } finally {
+      this.currentSessionId = null;
+    }
+  }
+
+  /** Override in subclasses that need a linear step flow (e.g. AAA). */
+  protected async runPipeline(
+    sessionId: string,
+    credentials: Record<string, string>
+  ): Promise<DocumentResult> {
+    this.resetCarrierState();
+
+    await this.progress("Launching secure browser…");
     const page = await this.openBrowser();
 
-    // 1. Login
-    this.log(sessionId, "Logging in…");
+    await this.progress(this.signInStatusMessage());
     await this.login(page, credentials);
 
-    // 2. Trigger MFA (carrier-specific — dynamically evaluates if Okta triggers)
-    this.log(sessionId, "Evaluating MFA challenge…");
-    const requiresMfa = await this.triggerMfa(page);
+    await this.progress(this.postSignInCheckMessage());
+    await this.resolveMfaCheckpoints(sessionId, page);
 
-    if (requiresMfa) {
-      await this.store.transition(sessionId, CarrierState.AWAITING_MFA);
-      
-      // 3. Poll Redis until the user submits their MFA code
-      const mfaCode = await this.awaitMfaCode(sessionId);
+    do {
+      await this.progress(this.navigateToDocumentsMessage());
+      await this.navigateToDocumentsArea(page);
+      await this.progress(this.postNavigationCheckMessage());
+      await this.resolveMfaCheckpoints(sessionId, page);
+    } while (await this.navigationPending(page));
 
-      // 4. Submit the code in the browser
-      this.log(sessionId, "Submitting MFA code…");
-      await this.store.transition(sessionId, CarrierState.MFA_SUBMITTED);
-      await this.submitMfaInBrowser(page, mfaCode);
-    } else {
-      this.log(sessionId, "MFA bypassed or not required by carrier.");
+    const documents = await this.fetchDocumentsWithTransition(sessionId, page);
+    return this.finalizeDocuments(sessionId, documents);
+  }
+
+  protected async fetchDocumentsWithTransition(
+    sessionId: string,
+    page: Page
+  ): Promise<DocumentResult["documents"]> {
+    await this.store.transition(sessionId, CarrierState.FETCHING_DOCS, {
+      statusMessage: this.fetchDocumentsMessage(),
+    });
+    return this.fetchDocuments(page);
+  }
+
+  protected async finalizeDocuments(
+    sessionId: string,
+    documents: DocumentResult["documents"]
+  ): Promise<DocumentResult> {
+    if (documents.length > 0) {
+      const base64String = documents[0].data.toString("base64");
+      await this.progress("Preparing document for download…");
+      return this.redis
+        .set(`document:${sessionId}`, base64String, { ex: 3600 })
+        .then(() => this.completeSession(sessionId, documents));
     }
+    return this.completeSession(sessionId, documents);
+  }
 
-    // 5. Fetch documents
-    this.log(sessionId, "Fetching documents…");
-    await this.store.transition(sessionId, CarrierState.FETCHING_DOCS);
-    const documents = await this.fetchDocuments(page);
-
-    // 6. Store Document to Redis for API Delivery
-    if (documents && documents.length > 0) {
-      const firstDoc = documents[0];
-      const base64String = firstDoc.data.toString("base64");
-      this.log(sessionId, "Storing document in Redis for UI delivery…");
-      await this.redis.set(`document:${sessionId}`, base64String, { ex: 3600 });
-    }
-
-    // 7. Complete
-    await this.store.transition(sessionId, CarrierState.COMPLETED);
+  private async completeSession(
+    sessionId: string,
+    documents: DocumentResult["documents"]
+  ): Promise<DocumentResult> {
+    await this.store.transition(sessionId, CarrierState.COMPLETED, {
+      statusMessage: `Done — ${documents.length} document(s) ready`,
+    });
     this.log(sessionId, `Completed — ${documents.length} document(s) extracted`);
 
     return {
@@ -152,23 +183,58 @@ export abstract class BaseCarrier {
 
   // ─── MFA Polling Loop ─────────────────────────────────────────────────────────
 
+  /** Max OTP rounds per checkpoint (login vs. post-navigation). */
+  private static readonly MAX_MFA_ROUNDS = 5;
+
+  /**
+   * Repeatedly detects MFA, waits for the user code, and submits until clear
+   * or `MAX_MFA_ROUNDS` is exceeded.
+   */
+  private async resolveMfaCheckpoints(
+    sessionId: string,
+    page: Page
+  ): Promise<void> {
+    for (let round = 0; round < BaseCarrier.MAX_MFA_ROUNDS; round++) {
+      const requiresMfa = await this.detectMfa(page);
+
+      if (!requiresMfa) {
+        if (round === 0) {
+          await this.progress("No additional verification needed — continuing…");
+        }
+        return;
+      }
+
+      await this.store.transition(sessionId, CarrierState.AWAITING_MFA, {
+        statusMessage: this.mfaAwaitingMessage(round),
+      });
+
+      const mfaCode = await this.awaitMfaCode(sessionId);
+
+      await this.store.transition(sessionId, CarrierState.MFA_SUBMITTED, {
+        statusMessage: "Submitting verification code…",
+      });
+      await this.submitMfaInBrowser(page, mfaCode);
+      await this.afterMfaSubmit(page);
+    }
+
+    throw new Error(
+      `Exceeded maximum MFA rounds (${BaseCarrier.MAX_MFA_ROUNDS})`
+    );
+  }
+
   /**
    * Polls Redis every `mfaPollIntervalMs` until a code appears or timeout fires.
    * Uses `GETDEL` (via SessionStore.consumeMfa) so the code is consumed once.
    */
-  private async awaitMfaCode(sessionId: string): Promise<string> {
+  protected async awaitMfaCode(sessionId: string): Promise<string> {
     const deadline = Date.now() + this.config.mfaTimeoutMs;
-    this.log(
-      sessionId,
-      `Awaiting MFA — polling every ${this.config.mfaPollIntervalMs}ms, ` +
-        `timeout in ${this.config.mfaTimeoutMs / 1_000}s`
-    );
+    await this.progress("Waiting for you to enter your verification code…");
 
     while (Date.now() < deadline) {
       const code = await this.store.consumeMfa(sessionId);
 
       if (code) {
-        this.log(sessionId, "MFA code received");
+        await this.progress("Code received — verifying…");
         return code;
       }
 
@@ -182,12 +248,22 @@ export abstract class BaseCarrier {
 
   // ─── Browser Lifecycle ────────────────────────────────────────────────────────
 
-  private async openBrowser(): Promise<Page> {
+  protected async openBrowser(): Promise<Page> {
+    const wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
+
     this.browser = await puppeteer.connect({
-      browserWSEndpoint: this.config.browserlessWsEndpoint,
+      browserWSEndpoint: wsEndpoint,
     });
 
     const page = await this.browser.newPage();
+
+    await page.setJavaScriptEnabled(true);
+    await page
+      .createCDPSession()
+      .then((cdp) =>
+        cdp.send("Emulation.setScriptExecutionDisabled", { value: false })
+      )
+      .catch(() => {});
 
     // Reasonable defaults — subclasses can override via `configurePage`
     await page.setViewport({ width: 1_280, height: 900 });
@@ -211,17 +287,28 @@ export abstract class BaseCarrier {
 
   private async failSession(sessionId: string, error: string): Promise<void> {
     try {
-      await this.store.transition(sessionId, CarrierState.FAILED, { error });
+      await this.store.transition(sessionId, CarrierState.FAILED, {
+        error,
+        statusMessage: error,
+      });
     } catch {
       // Don't mask the original error if the transition itself fails
     }
     this.log(sessionId, `FAILED — ${error}`);
   }
 
-  // ─── Logging ──────────────────────────────────────────────────────────────────
+  // ─── Logging & UI status ─────────────────────────────────────────────────────
 
   protected log(sessionId: string, message: string): void {
     console.log(`[${this.carrierId}][${sessionId}] ${message}`);
+  }
+
+  /** Writes a detailed status line to Redis for the polling UI. */
+  protected async progress(message: string): Promise<void> {
+    const sessionId = this.currentSessionId;
+    if (!sessionId) return;
+    this.log(sessionId, message);
+    await this.store.patchStatus(sessionId, message);
   }
 
   // ─── Abstract Interface ───────────────────────────────────────────────────────
@@ -232,6 +319,44 @@ export abstract class BaseCarrier {
    */
   protected async configurePage(_page: Page): Promise<void> {}
 
+  /** Reset per-run instance state (subclasses with navigation flags). */
+  protected resetCarrierState(): void {}
+
+  /** Return true when navigateToDocumentsArea must run again (e.g. after MFA). */
+  protected async navigationPending(_page: Page): Promise<boolean> {
+    return false;
+  }
+
+  /** Optional hook after each MFA submission (e.g. wait for navigation). */
+  protected async afterMfaSubmit(_page: Page): Promise<void> {}
+
+  /** Status line while paused for the user OTP (round is 0-based). */
+  protected mfaAwaitingMessage(round: number): string {
+    return round === 0
+      ? "Verification required — enter the code we sent you"
+      : `Verification required again (step ${round + 1}) — enter your code`;
+  }
+
+  protected signInStatusMessage(): string {
+    return "Signing in to carrier portal…";
+  }
+
+  protected postSignInCheckMessage(): string {
+    return "Checking for security verification after sign-in…";
+  }
+
+  protected navigateToDocumentsMessage(): string {
+    return "Navigating to your policy documents…";
+  }
+
+  protected postNavigationCheckMessage(): string {
+    return "Checking for security verification on policy site…";
+  }
+
+  protected fetchDocumentsMessage(): string {
+    return "Downloading policy declarations…";
+  }
+
   /** Navigate to the carrier portal and authenticate with `credentials`. */
   protected abstract login(
     page: Page,
@@ -239,10 +364,16 @@ export abstract class BaseCarrier {
   ): Promise<void>;
 
   /**
-   * Trigger the MFA challenge on the portal (e.g. click "Send Code").
-   * Returns true if MFA is required, false if the portal bypasses it.
+   * Return true when an OTP/MFA screen is visible on the active page.
+   * Implementations may click "Send code" before returning true.
    */
-  protected abstract triggerMfa(page: Page): Promise<boolean>;
+  protected abstract detectMfa(page: Page): Promise<boolean>;
+
+  /**
+   * Navigate from the post-login view to where policy documents live.
+   * No-op for carriers that land on the dashboard immediately after MFA.
+   */
+  protected abstract navigateToDocumentsArea(page: Page): Promise<void>;
 
   /** Type and submit the MFA code in the browser UI. */
   protected abstract submitMfaInBrowser(page: Page, code: string): Promise<void>;

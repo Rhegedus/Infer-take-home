@@ -24,12 +24,14 @@ export const VALID_TRANSITIONS: Record<CarrierState, CarrierState[]> = {
 // ─── Session Envelope ──────────────────────────────────────────────────────────
 
 export interface CarrierSession {
-  sessionId:   string;
-  carrierId:   string;
-  state:       CarrierState;
-  mfaCode?:    string;
-  error?:      string;
-  updatedAt:   number; // unix ms
+  sessionId:      string;
+  carrierId:      string;
+  state:          CarrierState;
+  /** Human-readable step detail shown in the UI while this state is active. */
+  statusMessage?: string;
+  mfaCode?:       string;
+  error?:         string;
+  updatedAt:      number; // unix ms
 }
 
 // ─── Extraction Result ─────────────────────────────────────────────────────────

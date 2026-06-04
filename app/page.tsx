@@ -15,11 +15,12 @@ type SessionState =
   | "FAILED";
 
 interface CarrierSession {
-  sessionId:  string;
-  carrierId:  string;
-  state:      SessionState;
-  error?:     string;
-  updatedAt:  number;
+  sessionId:      string;
+  carrierId:      string;
+  state:          SessionState;
+  statusMessage?: string;
+  error?:         string;
+  updatedAt:      number;
 }
 
 interface Carrier {
@@ -57,13 +58,18 @@ const CARRIERS: Carrier[] = [
 const POLL_INTERVAL_MS = 2_500;
 
 const STATE_LABELS: Record<SessionState, string> = {
-  INITIALIZED:   "Starting session…",
-  AWAITING_MFA:  "Waiting for your code",
-  MFA_SUBMITTED: "Verifying code…",
-  FETCHING_DOCS: "Fetching documents…",
-  COMPLETED:     "Done",
+  INITIALIZED:   "In progress",
+  AWAITING_MFA:  "Verification required",
+  MFA_SUBMITTED: "Verifying",
+  FETCHING_DOCS: "Fetching documents",
+  COMPLETED:     "Complete",
   FAILED:        "Failed",
 };
+
+function displayStatus(session: CarrierSession): string {
+  if (session.state === "FAILED" && session.error) return session.error;
+  return session.statusMessage ?? STATE_LABELS[session.state];
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -326,9 +332,12 @@ export default function Page() {
 
           {/* Status label */}
           {session && (
-            <p style={styles.statusLabel}>
-              {STATE_LABELS[session.state]}
-            </p>
+            <div style={styles.statusBlock}>
+              <p style={styles.statusLabel}>{displayStatus(session)}</p>
+              {session.statusMessage && session.state !== "FAILED" && (
+                <p style={styles.statusPhase}>{STATE_LABELS[session.state]}</p>
+              )}
+            </div>
           )}
 
           {/* Session ID (for debugging) */}
@@ -660,11 +669,23 @@ const styles: Record<string, React.CSSProperties> = {
     height:          2,
     transition:      "background 0.3s",
   },
-  statusLabel: {
-    fontSize:        14,
-    fontWeight:      500,
-    color:           "#334155",
+  statusBlock: {
     margin:          "0 0 8px",
+  },
+  statusLabel: {
+    fontSize:        15,
+    fontWeight:      600,
+    color:           "#0f172a",
+    margin:          "0 0 4px",
+    lineHeight:      1.45,
+  },
+  statusPhase: {
+    fontSize:        12,
+    fontWeight:      500,
+    color:           "#64748b",
+    margin:          0,
+    textTransform:   "uppercase" as const,
+    letterSpacing:   "0.04em",
   },
   sessionId: {
     fontSize:        11,

@@ -76,15 +76,19 @@ export class LemonadeCarrier extends BaseCarrier {
 
     await this.navigateToLogin(page);
     await this.submitCredentials(page, email);
+    await this.progress(
+      "Check your email — Lemonade sent a 6-digit code to complete sign-in"
+    );
   }
 
   // ─── Step 1: Navigate ─────────────────────────────────────────────────────
 
   private async navigateToLogin(page: Page): Promise<void> {
+    await this.progress("Opening Lemonade sign-in…");
     await page.goto(LEMONADE_LOGIN_URL, { waitUntil: "networkidle2" });
     await LemonadeCarrier.dismissCookieBanner(page);
 
-    // Confirm the email input is rendered before proceeding
+    await this.progress("Preparing email sign-in form…");
     await page.waitForSelector(SELECTORS.emailInput, {
       visible: true,
       timeout: DOM_TIMEOUT,
@@ -98,7 +102,7 @@ export class LemonadeCarrier extends BaseCarrier {
    * No password field — Lemonade's portal transitions directly to the OTP screen.
    */
   private async submitCredentials(page: Page, email: string): Promise<void> {
-    // Clear any autofilled value
+    await this.progress("Submitting your email…");
     await page.evaluate(
       (sel) => ((document.querySelector(sel) as HTMLInputElement).value = ""),
       SELECTORS.emailInput
@@ -108,29 +112,72 @@ export class LemonadeCarrier extends BaseCarrier {
     await page.waitForSelector(SELECTORS.submitButton, { visible: true });
     await page.click(SELECTORS.submitButton);
 
-    // Lemonade transitions the SPA to the OTP screen without a full navigation.
-    // Gate on the first OTP input appearing rather than waitForNavigation.
+    await this.progress("Waiting for email verification screen…");
     await page.waitForSelector(SELECTORS.otpInputs, {
       visible: true,
       timeout: DOM_TIMEOUT,
     });
   }
 
-  // ─── triggerMfa() — required by BaseCarrier ──────────────────────────────
+  // ─── detectMfa() — required by BaseCarrier ───────────────────────────────
 
   /**
    * Lemonade triggers the OTP automatically when the email is submitted.
-   * We confirm the OTP inputs are visible and return true to pause the state machine.
+   * OTP inputs on screen mean we should pause for the user code.
    */
-  protected async triggerMfa(page: Page): Promise<boolean> {
-    // The OTP inputs should already be visible from submitCredentials,
-    // but we wait again defensively in case of slow network renders.
-    await page.waitForSelector(SELECTORS.otpInputs, {
+  protected override signInStatusMessage(): string {
+    return "Signing in to Lemonade with your email…";
+  }
+
+  protected override postSignInCheckMessage(): string {
+    return "Waiting for your email verification code…";
+  }
+
+  protected override navigateToDocumentsMessage(): string {
+    return "Loading your Lemonade policies…";
+  }
+
+  protected override postNavigationCheckMessage(): string {
+    return "Confirming sign-in is complete…";
+  }
+
+  protected override fetchDocumentsMessage(): string {
+    return "Downloading your Lemonade policy PDF…";
+  }
+
+  protected override mfaAwaitingMessage(round: number): string {
+    return round === 0
+      ? "Enter the 6-digit code from your email"
+      : `Enter the new 6-digit code from your email (step ${round + 1})`;
+  }
+
+  protected async detectMfa(page: Page): Promise<boolean> {
+    const inputs = await page.$$(SELECTORS.otpInputs);
+    if (inputs.length >= OTP_INPUT_COUNT) {
+      return true;
+    }
+
+    try {
+      await page.waitForSelector(SELECTORS.otpInputs, {
+        visible: true,
+        timeout: 3_000,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ─── navigateToDocumentsArea() — required by BaseCarrier ───────────────
+
+  /** After OTP, wait for the dashboard policy list (no extra URLs to open). */
+  protected async navigateToDocumentsArea(page: Page): Promise<void> {
+    await this.progress("Loading your Lemonade dashboard…");
+    await page.waitForSelector(SELECTORS.policyCard, {
       visible: true,
       timeout: DOM_TIMEOUT,
     });
-    
-    return true; // Always requires MFA
+    await LemonadeCarrier.dismissCookieBanner(page);
   }
 
   // ─── submitMfaInBrowser() — required by BaseCarrier ──────────────────────
@@ -142,7 +189,15 @@ export class LemonadeCarrier extends BaseCarrier {
    * first field does not work — the portal listens to individual `input` events
    * per cell and does not relay characters to subsequent inputs automatically.
    */
+  protected override async afterMfaSubmit(page: Page): Promise<void> {
+    await this.progress("Verifying code — loading your dashboard…");
+    await page
+      .waitForNavigation({ waitUntil: "networkidle2", timeout: NAV_TIMEOUT })
+      .catch(() => {});
+  }
+
   protected async submitMfaInBrowser(page: Page, code: string): Promise<void> {
+    await this.progress("Entering your email verification code…");
     // Upstash Redis auto-deserializes values that look like numbers into actual
     // Number types. An all-digit OTP like "123456" comes back as 123456, which
     // has no .replace() method. String() normalises either type safely.
@@ -155,7 +210,7 @@ export class LemonadeCarrier extends BaseCarrier {
     }
 
     // Re-query inputs at submission time to get a fresh NodeList after any
-    // React re-renders that may have replaced DOM nodes since triggerMfa.
+    // React re-renders that may have replaced DOM nodes since detectMfa.
     const inputs = await page.$$(SELECTORS.otpInputs);
 
     if (inputs.length < OTP_INPUT_COUNT) {
@@ -166,12 +221,8 @@ export class LemonadeCarrier extends BaseCarrier {
 
     for (let i = 0; i < OTP_INPUT_COUNT; i++) {
       await inputs[i].click();
-      // Use type() on the element handle for focus + keystroke fidelity
       await inputs[i].type(digits[i], { delay: 60 });
     }
-
-    // After the last digit, Lemonade auto-submits — wait for the dashboard.
-    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
   }
 
   // ─── fetchDocuments() — required by BaseCarrier ──────────────────────────
@@ -184,14 +235,14 @@ export class LemonadeCarrier extends BaseCarrier {
    * the declarations page — we treat the full-page PDF as the document.
    */
   protected async fetchDocuments(page: Page): Promise<DocumentResult["documents"]> {
+    await this.progress("Selecting your policy…");
     await page.waitForSelector(SELECTORS.policyCard, {
       visible: true,
       timeout: DOM_TIMEOUT,
     });
     await LemonadeCarrier.dismissCookieBanner(page);
 
-    // Click opens me.lemonade.com/policy/… in a new tab — wait for that URL,
-    // not the dashboard policyCard selector (different DOM on the policy SPA).
+    await this.progress("Opening policy declarations page…");
     const browser = page.browser();
     const policyPage = await Promise.all([
       LemonadeCarrier.waitForPolicyTab(browser, NAV_TIMEOUT),
@@ -214,6 +265,12 @@ export class LemonadeCarrier extends BaseCarrier {
 
     const policyId = policyUrl.split("/policy/")[1]?.split("?")[0] ?? "unknown";
 
+    await this.progress(
+      policyId !== "unknown"
+        ? `Loading policy ${policyId}…`
+        : "Loading policy page…"
+    );
+
     await policyPage
       .waitForFunction(
         () => !document.querySelector('[data-loading="true"]'),
@@ -221,8 +278,10 @@ export class LemonadeCarrier extends BaseCarrier {
       )
       .catch(() => {});
 
+    await this.progress("Preparing policy page for download…");
     await LemonadeCarrier.preparePolicyPageForPdf(policyPage);
 
+    await this.progress("Capturing policy PDF…");
     const pdfBytes = await policyPage.pdf({
       format: "Letter",
       printBackground: true,

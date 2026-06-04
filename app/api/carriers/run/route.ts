@@ -61,6 +61,7 @@ export async function POST(req: NextRequest) {
 
   // start() writes INITIALIZED to Redis, fires the pipeline in the background,
   // and returns the sessionId before any browser work begins.
+  // This maintains your existing, stable session lifecycle.
   const sessionId = await carrier.start(credentials);
 
   return NextResponse.json({ ok: true, sessionId }, { status: 202 });

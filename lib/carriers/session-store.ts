@@ -44,6 +44,20 @@ export class SessionStore {
   }
 
   /**
+   * Update the live status line without changing the state machine phase.
+   */
+  async patchStatus(sessionId: string, statusMessage: string): Promise<void> {
+    const session = await this.get(sessionId);
+    if (!session) return;
+
+    await this.redis.set(
+      this.sessionKey(sessionId),
+      { ...session, statusMessage, updatedAt: Date.now() },
+      { ex: this.ttlSec }
+    );
+  }
+
+  /**
    * Atomically validate and apply a state transition.
    * Throws if the transition is not permitted by the state machine.
    */
