@@ -1,0 +1,45 @@
+import { NextRequest, NextResponse } from "next/server";
+import { Redis } from "@upstash/redis";
+import { SessionStore } from "@/lib/carriers/session-store";
+import { CarrierState } from "@/lib/carriers/types";
+
+const redis = Redis.fromEnv();
+const store = new SessionStore(redis, 3_600);
+
+/**
+ * POST /api/carriers/mfa
+ *
+ * Body: { sessionId: string; code: string }
+ *
+ * Called by the frontend (or a webhook) when the user has their MFA token.
+ * Writes the code to Redis so the polling loop in BaseCarrier picks it up.
+ */
+export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => null);
+
+  if (!body?.sessionId || !body?.code) {
+    return NextResponse.json(
+      { error: "sessionId and code are required" },
+      { status: 400 }
+    );
+  }
+
+  const { sessionId, code } = body as { sessionId: string; code: string };
+
+  const session = await store.get(sessionId);
+
+  if (!session) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  if (session.state !== CarrierState.AWAITING_MFA) {
+    return NextResponse.json(
+      { error: `Session is not awaiting MFA (current state: ${session.state})` },
+      { status: 409 }
+    );
+  }
+
+  await store.submitMfa(sessionId, code);
+
+  return NextResponse.json({ ok: true, sessionId });
+}
