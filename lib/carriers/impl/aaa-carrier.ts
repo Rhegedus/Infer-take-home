@@ -99,7 +99,7 @@ export class AaaCarrier extends BaseCarrier {
     const newPage = await newTargetPromise;
     this.activeTab = newPage; // Store the new tab context for subsequent steps
 
-    console.log(`[aaa][${this.sessionId}] Evaluating AAA Okta MFA race...`);
+    console.log(`[aaa] Evaluating AAA Okta MFA race...`);
     
     // Race condition: Okta MFA wall vs Direct Dashboard Access
     const raceResult = await Promise.race([
@@ -164,13 +164,13 @@ export class AaaCarrier extends BaseCarrier {
     // Wait for the browser to render the PDF buffer internally
     await pdfPage.waitForNavigation({ waitUntil: "networkidle0" }).catch(() => {});
 
-    const pdfBuffer = await pdfPage.pdf({ format: "A4" });
+    const pdfBytes = await pdfPage.pdf({ format: "A4" });
 
     return [{
       type: "policy",
       filename: "policy-declarations.pdf",
       mimeType: "application/pdf",
-      data: pdfBuffer
+      data: Buffer.from(pdfBytes)
     }];
   }
 

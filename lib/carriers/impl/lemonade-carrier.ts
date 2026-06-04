@@ -37,17 +37,17 @@ const NAV_TIMEOUT  = 30_000;
  * Concrete extractor for Lemonade's member portal (renters / homeowners).
  *
  * Auth flow (passwordless OTP):
- *   1. Navigate to /login#email
- *   2. Fill email using data-atn-id attributes  →  click Submit
- *   3. Lemonade immediately sends the OTP — no explicit trigger needed
- *   4. Wait for 6 individual OTP inputs to appear
- *   5. Type each digit of the code into its own input field
+ * 1. Navigate to /login#email
+ * 2. Fill email using data-atn-id attributes  →  click Submit
+ * 3. Lemonade immediately sends the OTP — no explicit trigger needed
+ * 4. Wait for 6 individual OTP inputs to appear
+ * 5. Type each digit of the code into its own input field
  *
  * Document flow:
- *   1. Land on the dashboard after OTP
- *   2. Click the first policy card title (class*="HomeExistingProductItem__Title")
- *   3. Intercept the new tab opened by the click via browser().waitForTarget()
- *   4. Wait for the policy page to settle, then capture it as a PDF via page.pdf()
+ * 1. Land on the dashboard after OTP
+ * 2. Click the first policy card title (class*="HomeExistingProductItem__Title")
+ * 3. Intercept the new tab opened by the click via browser().waitForTarget()
+ * 4. Wait for the policy page to settle, then capture it as a PDF via page.pdf()
  */
 export class LemonadeCarrier extends BaseCarrier {
   readonly carrierId = "lemonade";
@@ -63,7 +63,7 @@ export class LemonadeCarrier extends BaseCarrier {
 
   /**
    * Lemonade is passwordless: login only requires an email address.
-   * Orchestrates `navigateToLogin` → `submitCredentials`.
+   * Orchestrates `MapsToLogin` → `submitCredentials`.
    */
   protected async login(
     page: Page,
@@ -116,16 +116,17 @@ export class LemonadeCarrier extends BaseCarrier {
 
   /**
    * Lemonade triggers the OTP automatically when the email is submitted.
-   * The only work here is confirming the OTP inputs are visible before the
-   * base class transitions the state machine to AWAITING_MFA.
+   * We confirm the OTP inputs are visible and return true to pause the state machine.
    */
-  protected async triggerMfa(page: Page): Promise<void> {
+  protected async triggerMfa(page: Page): Promise<boolean> {
     // The OTP inputs should already be visible from submitCredentials,
     // but we wait again defensively in case of slow network renders.
     await page.waitForSelector(SELECTORS.otpInputs, {
       visible: true,
       timeout: DOM_TIMEOUT,
     });
+    
+    return true; // Always requires MFA
   }
 
   // ─── submitMfaInBrowser() — required by BaseCarrier ──────────────────────
