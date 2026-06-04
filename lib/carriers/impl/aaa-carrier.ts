@@ -3,27 +3,27 @@ import { BaseCarrier } from "../base-carrier";
 import { DocumentResult } from "../types";
 
 // ─── Selectors ────────────────────────────────────────────────────────────────
-// Defined as constants at the top so they're trivial to update if the AAA DOM changes.
-
 const SELECTORS = {
-  // Step 1 — Email
-  emailInput:       "#username",
-  continueButton:   "._button-login-id",
+  // Step 1 — Auth
+  emailInput:        'input[name="username"]',
+  continueButton:    'button[data-action-button-primary="true"]',
+  passwordInput:     'input[name="password"]',
+  signInButton:      'button._button-login-password',
 
-  // Step 2 — Password (appears after the UI transition)
-  passwordInput:    "#password",
-  signInButton:     "._button-login-password",
+  // Step 2 — Dashboard Navigation
+  insuranceLink:     'a[href="/my-account/insurance"]',
+  policyDocsLink:    'a[href*="documents"]',
 
-  // MFA screen
-  mfaDeliveryOption: "button[data-mfa-type]",      // "Text me" / "Email me" trigger
-  mfaCodeInput:      "#otpCode",                    // one-time code field
-  mfaSubmitButton:   "._button-login-passcode",     // submit the code
+  // Okta MFA screen
+  oktaSendCode:      'input[value="Send me the code"]',
+  mfaInput:          'input[name="answer"]',
+  mfaVerify:         'input[value="Verify"]',
 
-  // Post-auth documents page
-  documentLink:     "a[data-document-id]",          // individual doc download anchors
+  // Dashboard Target
+  dashboardText:     'p.MuiTypography-body1',
+  policyDetailsBtn:  'a[data-testid^="view-policy-details-button-"]',
+  declarationsChip:  'span.MuiChip-labelMedium'
 } as const;
-
-const AAA_LOGIN_URL = "https://auth.mwg.aaa.com/u/login/identifier?state=hKFo2SBnZzBCOE5tYjhVZXZGX29hckt0M0g2d2E4N1NIcEVUUKFur3VuaXZlcnNhbC1sb2dpbqN0aWTZIFIyMTBSN2xmSVo0a0JHdkFkTGF1OUg2cFFaTm9XR1ZRo2NpZLRBQUEuQ0xVQi5DU0FBTVAuUFJPRA";
 
 // Timeout for DOM transitions that are not navigation events (ms)
 const DOM_TRANSITION_TIMEOUT = 15_000;
@@ -32,89 +32,35 @@ const NAVIGATION_TIMEOUT     = 30_000;
 
 // ─── AaaCarrier ───────────────────────────────────────────────────────────────
 
-/**
- * AaaCarrier
- * ----------
- * Concrete extractor for the AAA member portal.
- *
- * Login flow (two-step SPA transition):
- *   1. Land on /login  →  enter email  →  click Continue
- *   2. Portal reveals the password field in-place (no full navigation)
- *      →  wait for #password to become visible  →  enter password  →  Sign In
- *
- * MFA flow:
- *   Portal always presents an MFA challenge after successful credential entry.
- *   `triggerMfa` clicks the user's preferred delivery method;
- *   `submitMfaInBrowser` fills and submits the code once the base class
- *   has collected it from Redis.
- */
 export class AaaCarrier extends BaseCarrier {
   readonly carrierId = "aaa";
+  
+  // Tracks the active tab context since AAA opens multiple windows during the flow
+  private activeTab: Page | null = null;
 
   // ─── Page Configuration ─────────────────────────────────────────────────────
 
   protected override async configurePage(page: Page): Promise<void> {
-    // AAA's portal checks Accept-Language for localization
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
     });
 
-    // Override the navigation timeout set by the base class for this carrier
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
     page.setDefaultTimeout(DOM_TRANSITION_TIMEOUT);
   }
 
   // ─── login() — required by BaseCarrier ──────────────────────────────────────
 
-  /**
-   * Orchestrates `navigateToLogin` → `submitCredentials`.
-   * Maps onto the BaseCarrier contract; detailed logic lives in the helpers below.
-   */
   protected async login(
     page: Page,
     credentials: Record<string, string>
   ): Promise<void> {
     const { email, password } = AaaCarrier.extractCredentials(credentials);
 
-    await this.navigateToLogin(page);
-    await this.submitCredentials(page, email, password);
-  }
-
-  // ─── Step 1: Navigate ────────────────────────────────────────────────────────
-
-  /**
-   * Navigates to the AAA login page and waits until the email input is ready.
-   */
-  private async navigateToLogin(page: Page): Promise<void> {
-    await page.goto(AAA_LOGIN_URL, { waitUntil: "networkidle2" });
-
-    await page.waitForSelector(SELECTORS.emailInput, {
-      visible: true,
-      timeout: DOM_TRANSITION_TIMEOUT,
-    });
-  }
-
-  // ─── Step 2: Submit Credentials (two-step SPA flow) ─────────────────────────
-
-  /**
-   * Handles the two-step credential form:
-   *
-   *   Phase A  →  fill email  →  click Continue (no page navigation)
-   *   Phase B  →  wait for #password to become visible  →  fill password  →  Sign In
-   *
-   * The portal swaps between phases via a CSS visibility toggle, not a navigation,
-   * so we wait on `waitForSelector` with `state: 'visible'` rather than
-   * `waitForNavigation`.
-   */
-  private async submitCredentials(
-    page: Page,
-    email: string,
-    password: string
-  ): Promise<void> {
-    // ── Phase A: Email ──────────────────────────────────────────────────────────
+    await page.goto("https://mwg.aaa.com/my-account/insurance", { waitUntil: "networkidle2" });
 
     await page.waitForSelector(SELECTORS.emailInput, { visible: true });
-
+    
     // Clear any pre-filled value before typing
     await page.evaluate(
       (sel) => ((document.querySelector(sel) as HTMLInputElement).value = ""),
@@ -125,136 +71,111 @@ export class AaaCarrier extends BaseCarrier {
     await page.waitForSelector(SELECTORS.continueButton, { visible: true });
     await page.click(SELECTORS.continueButton);
 
-    // ── Phase B: Password ───────────────────────────────────────────────────────
-
     // The Continue click hides the email phase and reveals the password phase
-    // in-place; there is no navigation event to await, so we explicitly gate
-    // on the password field becoming visible before typing.
     await page.waitForSelector(SELECTORS.passwordInput, {
       visible: true,
       timeout: DOM_TRANSITION_TIMEOUT,
     });
 
     await page.type(SELECTORS.passwordInput, password, { delay: 40 });
-
     await page.waitForSelector(SELECTORS.signInButton, { visible: true });
-
-    // Sign In triggers a real navigation to the authenticated portal
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: NAVIGATION_TIMEOUT }),
-      page.click(SELECTORS.signInButton),
-    ]);
+    await page.click(SELECTORS.signInButton);
   }
 
   // ─── triggerMfa() — required by BaseCarrier ─────────────────────────────────
 
-  /**
-   * Determines whether the portal has presented an MFA challenge.
-   * AAA always requires MFA, but we still defensively check the DOM.
-   *
-   * Clicks the first available delivery-method button (e.g. "Text me a code")
-   * to request the one-time code.
-   */
-  protected async triggerMfa(page: Page): Promise<void> {
-    if (!(await this.requiresMfa(page))) {
-      // No MFA screen — portal may have remembered this device; proceed directly.
-      return;
+  protected async triggerMfa(page: Page): Promise<boolean> {
+    await page.waitForSelector(SELECTORS.insuranceLink, { visible: true, timeout: NAVIGATION_TIMEOUT });
+    await page.click(SELECTORS.insuranceLink);
+
+    // Native Tab Intercept for Policy Documents (First New Tab)
+    const newTargetPromise = new Promise<Page>((resolve) => {
+      page.browser().once("targetcreated", async (target) => resolve(await target.page() as Page));
+    });
+
+    await page.waitForSelector(SELECTORS.policyDocsLink, { visible: true });
+    await page.click(SELECTORS.policyDocsLink);
+
+    const newPage = await newTargetPromise;
+    this.activeTab = newPage; // Store the new tab context for subsequent steps
+
+    console.log(`[aaa][${this.sessionId}] Evaluating AAA Okta MFA race...`);
+    
+    // Race condition: Okta MFA wall vs Direct Dashboard Access
+    const raceResult = await Promise.race([
+      newPage.waitForSelector(SELECTORS.oktaSendCode, { visible: true, timeout: 15000 }).then(() => 'mfa'),
+      newPage.waitForFunction(
+        (sel) => document.querySelector(sel)?.textContent?.includes('View policies'),
+        { timeout: 15000 },
+        SELECTORS.dashboardText
+      ).then(() => 'dashboard')
+    ]);
+
+    if (raceResult === 'mfa') {
+      await newPage.click(SELECTORS.oktaSendCode);
+      return true;
     }
-
-    // Select the first delivery option presented (SMS preferred over email
-    // by DOM order on the AAA portal — adjust the selector if needed)
-    await page.waitForSelector(SELECTORS.mfaDeliveryOption, {
-      visible: true,
-      timeout: DOM_TRANSITION_TIMEOUT,
-    });
-    await page.click(SELECTORS.mfaDeliveryOption);
-
-    // Wait for the code input to appear, confirming the code was sent
-    await page.waitForSelector(SELECTORS.mfaCodeInput, {
-      visible: true,
-      timeout: DOM_TRANSITION_TIMEOUT,
-    });
+    
+    return false;
   }
 
   // ─── submitMfaInBrowser() — required by BaseCarrier ─────────────────────────
 
-  /**
-   * Types the MFA code (sourced from Redis by the base class polling loop)
-   * into the OTP field and submits it.
-   */
   protected async submitMfaInBrowser(page: Page, code: string): Promise<void> {
-    await page.waitForSelector(SELECTORS.mfaCodeInput, { visible: true });
+    const targetPage = this.activeTab || page;
+    const safeCode = String(code).replace(/\s/g, "");
 
-    // OTP inputs are often single-character cells; `type` with a slight delay
-    // ensures each keystroke registers in frameworks that listen per-character.
-    await page.type(SELECTORS.mfaCodeInput, code, { delay: 60 });
-
-    await page.waitForSelector(SELECTORS.mfaSubmitButton, { visible: true });
-
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: NAVIGATION_TIMEOUT }),
-      page.click(SELECTORS.mfaSubmitButton),
-    ]);
+    await targetPage.waitForSelector(SELECTORS.mfaInput, { visible: true });
+    await targetPage.type(SELECTORS.mfaInput, safeCode, { delay: 60 });
+    await targetPage.click(SELECTORS.mfaVerify);
   }
 
   // ─── fetchDocuments() — required by BaseCarrier ──────────────────────────────
 
   protected async fetchDocuments(page: Page): Promise<DocumentResult["documents"]> {
-    await page.goto("https://mywallet.acg.aaa.com/member-portal/documents", {
-      waitUntil: "networkidle2",
-      timeout:   NAVIGATION_TIMEOUT,
-    });
+    const targetPage = this.activeTab || page;
 
-    await page.waitForSelector(SELECTORS.documentLink, {
-      visible: true,
-      timeout: DOM_TRANSITION_TIMEOUT,
-    });
-
-    // Collect every (href, document-type, filename) tuple up-front
-    const entries = await page.$$eval(SELECTORS.documentLink, (anchors) =>
-      (anchors as HTMLAnchorElement[]).map((a) => ({
-        href:     a.href,
-        docType:  a.dataset.documentType ?? "UNKNOWN",
-        filename: a.dataset.filename ?? a.href.split("/").pop() ?? "document",
-      }))
+    // Ensure we are successfully on the dashboard view
+    await targetPage.waitForFunction(
+      (sel) => document.querySelector(sel)?.textContent?.includes('View policies'),
+      {},
+      SELECTORS.dashboardText
     );
 
-    const documents: DocumentResult["documents"] = [];
+    await targetPage.waitForSelector(SELECTORS.policyDetailsBtn, { visible: true });
+    await targetPage.click(SELECTORS.policyDetailsBtn);
 
-    for (const { href, docType, filename } of entries) {
-      const response = await page.goto(href, {
-        waitUntil: "networkidle2",
-        timeout:   NAVIGATION_TIMEOUT,
-      });
+    // Native Tab Intercept for Final PDF (Second New Tab)
+    const pdfTargetPromise = new Promise<Page>((resolve) => {
+      targetPage.browser().once("targetcreated", async (target) => resolve(await target.page() as Page));
+    });
 
-      if (!response?.ok()) {
-        console.warn(`[aaa] Skipping ${filename} — HTTP ${response?.status()}`);
-        continue;
-      }
+    await targetPage.waitForSelector(SELECTORS.declarationsChip, { visible: true });
+    
+    // Use evaluate to guarantee we click the exact span containing the correct text
+    await targetPage.evaluate((sel) => {
+      const elements = Array.from(document.querySelectorAll(sel));
+      const target = elements.find(el => el.textContent?.includes('Policy declarations')) as HTMLElement;
+      if (target) target.click();
+    }, SELECTORS.declarationsChip);
 
-      const data     = Buffer.from(await response.buffer());
-      const mimeType = response.headers()["content-type"] ?? "application/octet-stream";
+    const pdfPage = await pdfTargetPromise;
+    
+    // Wait for the browser to render the PDF buffer internally
+    await pdfPage.waitForNavigation({ waitUntil: "networkidle0" }).catch(() => {});
 
-      documents.push({ type: docType, filename, mimeType, data });
-    }
+    const pdfBuffer = await pdfPage.pdf({ format: "A4" });
 
-    return documents;
+    return [{
+      type: "policy",
+      filename: "policy-declarations.pdf",
+      mimeType: "application/pdf",
+      data: pdfBuffer
+    }];
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-  /**
-   * Returns `true` when the MFA challenge screen is visible in the DOM.
-   * Useful for portals that occasionally skip MFA for trusted devices.
-   */
-  private async requiresMfa(page: Page): Promise<boolean> {
-    const element = await page.$(SELECTORS.mfaDeliveryOption);
-    return element !== null;
-  }
-
-  /**
-   * Validates and destructures credentials, giving clear errors on missing keys.
-   */
   private static extractCredentials(
     credentials: Record<string, string>
   ): { email: string; password: string } {

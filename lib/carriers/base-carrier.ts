@@ -17,23 +17,24 @@ import {
  * Abstract base class for all insurance carrier extractors.
  *
  * Responsibilities:
- *  - Owns the Browserless CDP session lifecycle
- *  - Drives the Redis-backed state machine
- *  - Runs the async MFA polling loop
- *  - Delegates carrier-specific logic to concrete subclasses
+ * - Owns the Browserless CDP session lifecycle
+ * - Drives the Redis-backed state machine
+ * - Runs the async MFA polling loop
+ * - Delegates carrier-specific logic to concrete subclasses
  *
  * Subclasses MUST implement:
- *  - `carrierId`          – unique string identifier (e.g. "cigna", "aetna")
- *  - `login(page)`        – navigate to the portal and authenticate
- *  - `triggerMfa(page)`   – initiate MFA challenge on the portal
- *  - `submitMfa(page, code)` – type/submit the MFA code in the browser
- *  - `fetchDocuments(page)`  – scrape / download documents after auth
+ * - `carrierId`          – unique string identifier (e.g. "cigna", "aetna")
+ * - `login(page)`        – navigate to the portal and authenticate
+ * - `triggerMfa(page)`   – initiate MFA challenge on the portal (Returns boolean for conditional MFA)
+ * - `submitMfa(page, code)` – type/submit the MFA code in the browser
+ * - `fetchDocuments(page)`  – scrape / download documents after auth
  */
 export abstract class BaseCarrier {
   abstract readonly carrierId: string;
 
   protected readonly store: SessionStore;
   protected readonly config: Required<CarrierConfig>;
+  protected readonly redis: Redis;
 
   private browser: Browser | null = null;
 
@@ -43,6 +44,7 @@ export abstract class BaseCarrier {
       ...config,
     };
     this.config = merged;
+    this.redis = redis;
     this.store = new SessionStore(redis, merged.sessionTtlSec);
   }
 
@@ -105,25 +107,38 @@ export abstract class BaseCarrier {
     this.log(sessionId, "Logging in…");
     await this.login(page, credentials);
 
-    // 2. Trigger MFA (carrier-specific — may be a no-op for some carriers)
-    this.log(sessionId, "Triggering MFA challenge…");
-    await this.store.transition(sessionId, CarrierState.AWAITING_MFA);
-    await this.triggerMfa(page);
+    // 2. Trigger MFA (carrier-specific — dynamically evaluates if Okta triggers)
+    this.log(sessionId, "Evaluating MFA challenge…");
+    const requiresMfa = await this.triggerMfa(page);
 
-    // 3. Poll Redis until the user submits their MFA code
-    const mfaCode = await this.awaitMfaCode(sessionId);
+    if (requiresMfa) {
+      await this.store.transition(sessionId, CarrierState.AWAITING_MFA);
+      
+      // 3. Poll Redis until the user submits their MFA code
+      const mfaCode = await this.awaitMfaCode(sessionId);
 
-    // 4. Submit the code in the browser
-    this.log(sessionId, "Submitting MFA code…");
-    await this.store.transition(sessionId, CarrierState.MFA_SUBMITTED);
-    await this.submitMfaInBrowser(page, mfaCode);
+      // 4. Submit the code in the browser
+      this.log(sessionId, "Submitting MFA code…");
+      await this.store.transition(sessionId, CarrierState.MFA_SUBMITTED);
+      await this.submitMfaInBrowser(page, mfaCode);
+    } else {
+      this.log(sessionId, "MFA bypassed or not required by carrier.");
+    }
 
     // 5. Fetch documents
     this.log(sessionId, "Fetching documents…");
     await this.store.transition(sessionId, CarrierState.FETCHING_DOCS);
     const documents = await this.fetchDocuments(page);
 
-    // 6. Complete
+    // 6. Store Document to Redis for API Delivery
+    if (documents && documents.length > 0) {
+      const firstDoc = documents[0];
+      const base64String = firstDoc.data.toString("base64");
+      this.log(sessionId, "Storing document in Redis for UI delivery…");
+      await this.redis.set(`document:${sessionId}`, base64String, { ex: 3600 });
+    }
+
+    // 7. Complete
     await this.store.transition(sessionId, CarrierState.COMPLETED);
     this.log(sessionId, `Completed — ${documents.length} document(s) extracted`);
 
@@ -225,9 +240,9 @@ export abstract class BaseCarrier {
 
   /**
    * Trigger the MFA challenge on the portal (e.g. click "Send Code").
-   * Implement as a no-op if the carrier sends the code automatically.
+   * Returns true if MFA is required, false if the portal bypasses it.
    */
-  protected abstract triggerMfa(page: Page): Promise<void>;
+  protected abstract triggerMfa(page: Page): Promise<boolean>;
 
   /** Type and submit the MFA code in the browser UI. */
   protected abstract submitMfaInBrowser(page: Page, code: string): Promise<void>;

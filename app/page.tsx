@@ -380,16 +380,27 @@ export default function Page() {
 
       {/* ── Completed ───────────────────────────────────────────────────── */}
       {isCompleted && (
-        <section style={{ ...styles.card, borderColor: "#22c55e" }}>
-          <div style={styles.successIcon}>✓</div>
-          <h2 style={{ ...styles.sectionTitle, color: "#16a34a" }}>
-            Documents Retrieved
-          </h2>
-          <p style={styles.hint}>
-            Your {carrier.label} documents have been extracted and saved.
-          </p>
+        <section style={{ ...styles.card, borderColor: "#22c55e", maxWidth: 800 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
+            <div style={{ ...styles.successIcon, marginBottom: 0 }}>✓</div>
+            <div>
+              <h2 style={{ ...styles.sectionTitle, color: "#16a34a", marginBottom: 4 }}>
+                Documents Retrieved
+              </h2>
+              <p style={styles.hint}>
+                Your {carrier.label} documents have been successfully extracted.
+              </p>
+            </div>
+          </div>
+
+          <iframe
+            src={`/api/carriers/document?sessionId=${sessionId}`}
+            style={{ width: "100%", height: 600, border: "1.5px solid #e2e8f0", borderRadius: 8, marginBottom: 24, background: "#f8fafc" }}
+            title="Policy Document"
+          />
+
           <button
-            style={{ ...styles.btn, background: "#64748b", marginTop: 16 }}
+            style={{ ...styles.btn, background: "#64748b", width: "100%" }}
             onClick={() => {
               setSession(null);
               setSessionId(null);
@@ -481,7 +492,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding:         "28px 28px 24px",
     marginBottom:    20,
     boxShadow:       "0 1px 3px rgba(0,0,0,0.06)",
-    transition:      "border-color 0.3s",
+    transition:      "border-color 0.3s, max-width 0.3s ease-in-out",
   },
   form: {
     display:         "flex",
