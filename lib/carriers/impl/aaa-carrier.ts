@@ -88,31 +88,34 @@ export class AaaCarrier extends BaseCarrier {
     await page.waitForSelector(SELECTORS.insuranceLink, { visible: true, timeout: NAVIGATION_TIMEOUT });
     await page.click(SELECTORS.insuranceLink);
 
-    // Native Tab Intercept for Policy Documents (First New Tab)
     const newTargetPromise = new Promise<Page>((resolve) => {
-      page.browser().once("targetcreated", async (target) => resolve(await target.page() as Page));
+      page.browser().once("targetcreated", async (target) => {
+        // Only resolve if it's a real page, not a background worker
+        if (target.type() === 'page') {
+          resolve(await target.page() as Page);
+        }
+      });
     });
 
     await page.waitForSelector(SELECTORS.policyDocsLink, { visible: true });
     await page.click(SELECTORS.policyDocsLink);
 
-    const newPage = await newTargetPromise;
-    this.activeTab = newPage; // Store the new tab context for subsequent steps
+    this.activeTab = await newTargetPromise;
 
-    console.log(`[aaa] Evaluating AAA Okta MFA race...`);
-    
-    // Race condition: Okta MFA wall vs Direct Dashboard Access
+    const oktaSelector = 'input[value="Send me the code"]';
+    const dashboardSelector = 'p.MuiTypography-body1';
+
     const raceResult = await Promise.race([
-      newPage.waitForSelector(SELECTORS.oktaSendCode, { visible: true, timeout: 15000 }).then(() => 'mfa'),
-      newPage.waitForFunction(
+      this.activeTab.waitForSelector(oktaSelector, { visible: true, timeout: 15000 }).then(() => 'mfa'),
+      this.activeTab.waitForFunction(
         (sel) => document.querySelector(sel)?.textContent?.includes('View policies'),
         { timeout: 15000 },
-        SELECTORS.dashboardText
+        dashboardSelector
       ).then(() => 'dashboard')
     ]);
 
     if (raceResult === 'mfa') {
-      await newPage.click(SELECTORS.oktaSendCode);
+      await this.activeTab.click(oktaSelector);
       return true;
     }
     
