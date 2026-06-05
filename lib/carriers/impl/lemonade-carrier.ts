@@ -236,10 +236,28 @@ export class LemonadeCarrier extends BaseCarrier {
    */
   protected async fetchDocuments(page: Page): Promise<DocumentResult["documents"]> {
     await this.progress("Selecting your policy…");
-    await page.waitForSelector(SELECTORS.policyCard, {
-      visible: true,
-      timeout: DOM_TIMEOUT,
-    });
+    
+    let policyCardFound = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await page.waitForSelector(SELECTORS.policyCard, {
+          visible: true,
+          timeout: 8_000,
+        });
+        policyCardFound = true;
+        break;
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("Session closed");
+        if (isDetached && attempt < 3) {
+          console.log(`[lemonade] policyCard waitForSelector: frame detached/session closed on attempt ${attempt}. Retrying in 2s...`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        throw err;
+      }
+    }
+
     await LemonadeCarrier.dismissCookieBanner(page);
 
     await this.progress("Opening policy declarations page…");

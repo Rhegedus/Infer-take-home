@@ -18,15 +18,17 @@ We implemented a state machine coordinated through **Upstash Redis**:
 
 ---
 
-## 🍋 2. Lemonade: SPA Target/Tab Interception & PrintToPDF Failures
+## 🍋 2. Lemonade: SPA Target/Tab Interception & Frame Detachment
 
 ### The Challenge
-Lemonade opens the policy PDF in a new tab. In headless mode, if we tried to print the page to PDF (`page.pdf()`), it would frequently throw `printToPDF: Target closed` due to the tab loading asynchronously or the document closing too quickly.
+* Lemonade opens the policy PDF in a new tab. In headless mode, if we tried to print the page to PDF (`page.pdf()`), it would frequently throw `printToPDF: Target closed` due to the tab loading asynchronously or the document closing too quickly.
+* **Post-MFA Frame Detachment**: Immediately after verifying the MFA code, Lemonade's Single Page Application mounts the dashboard and updates client routing. On Vercel, this rapid client-side transition can cause Puppeteer to throw `Attempted to use detached Frame` if the scraper queries the policy card selector while the frame is reloading.
 
 ### The Solution
 * We set up a target listener (`browser.waitForTarget`) to intercept the newly opened tab as soon as the "View Policy" action is triggered.
 * Once the tab is acquired, instead of rendering a PDF printout, we extract the browser's cookies and perform a standard Node.js `fetch` to download the document.
 * We stripped out fixed consent overlays and cookie banners programmatically before extraction to prevent visual blocking.
+* **Frame Detach Retry**: Wrapped the dashboard policy-card `waitForSelector` in a retry loop (up to 3 attempts with a 2-second sleep). If a transient `detached Frame` error occurs during client routing, the scraper waits for the new frame context to settle and successfully locates the policy card on the next attempt.
 
 ---
 
