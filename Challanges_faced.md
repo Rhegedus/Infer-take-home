@@ -119,3 +119,16 @@ Since `BaseCarrier` stores the active Puppeteer `browser` and `currentSessionId`
 
 ### The Solution
 We refactored `app/api/carriers/run/route.ts` to dynamically instantiate `AaaCarrier` or `LemonadeCarrier` **per request** instead of reusing global singletons. This isolates the browser context, session IDs, and Puppeteer commands entirely to each session run.
+
+---
+
+## 🌐 9. Free-Tier Limitations vs. Production Architecture
+
+### The Challenge
+When testing in free-tier environments, we hit strict, hard-capped timeout limits that make interactive MFA flows impossible to run reliably:
+1. **Vercel Free Tier**: Enforces a strict **10-second execution limit** per serverless function, which is too short for logging in, waiting for user MFA, and downloading documents.
+2. **Browserless.io Free Tier**: Restricts sessions to a maximum of **60 seconds (1 minute)** and rejects custom `timeout` parameters with a `400 Bad Request`. When a user takes time to retrieve and enter an MFA code, the session is terminated server-side mid-execution, causing Puppeteer to throw `detached Frame` or `Session closed` errors.
+
+### The Solution
+* **Paid Production Tiers**: The codebase is architected to run seamlessly on paid tiers (Vercel Pro + Paid Browserless.io), where the custom `timeout=300000` (5 minutes) parameter is accepted, and function durations are extended to accommodate human MFA retrieval.
+* **100% Free Alternative (Docker/Raspberry Pi)**: For developers who want to avoid paid plans, containerizing the application using **Docker** and running it on a dedicated local machine (like a Raspberry Pi or home server) is the optimal path. The container runs a local Chromium browser internally (configured via `PUPPETEER_EXECUTABLE_PATH`), eliminating both Browserless and Vercel execution timeouts entirely while maintaining 100% production parity.
