@@ -31,6 +31,9 @@ const SEL_VIEW_DOCUMENTS = 'a[data-testid="viewDocumentsButton"]';
 // data-testid="Auto-Declaration-Page-link" href="blob:..." target="_blank"
 const SEL_AUTO_DECLARATION = 'a[data-testid="Auto-Declaration-Page-link"]';
 
+// Interstitial that appears after zip gate: "Continue to my AAA club"
+const SEL_CLUB_INTERSTITIAL = '[data-testid="continue-to-club-button"]';
+
 const NAV_TIMEOUT = 30_000;
 const DOM_TIMEOUT = 15_000;
 const OKTA_SUBMIT_TIMEOUT = 45_000;
@@ -385,31 +388,55 @@ export class AaaCarrier extends BaseCarrier {
         continue;
       }
 
+      let frameDetached = false;
       try {
         await tab.bringToFront().catch(() => {});
-        const selector = '[data-testid="zip-code-continue-button"], #zipSubmitButton';
-        const clicked = await tab.click(selector).then(() => true).catch(() => false);
-        if (!clicked) {
-          await tab.evaluate(() => {
-            const btn = document.querySelector(
-              '[data-testid="zip-code-continue-button"], #zipSubmitButton'
-            ) as HTMLElement | null;
-            if (btn) {
-              btn.click();
-              return;
-            }
-            const input = document.querySelector(
-              'input[name="zipCode"], input[name="zipcode"]'
-            ) as HTMLInputElement | null;
-            input?.closest("form")?.requestSubmit();
-          });
+
+        const ZIP_INPUT_SEL = 'input[name="zipCode"], input[name="zipcode"], input[id="zipcode"]';
+
+        // Primary method: focus the zip input and press Enter.
+        // This fires real keyboard events that React definitely listens to,
+        // and submits the form regardless of whether the button is enabled.
+        const inputHandle = await tab.$(ZIP_INPUT_SEL).catch(() => null);
+        if (inputHandle) {
+          await inputHandle.focus().catch(() => {});
+          console.log(`[aaa] Zip submit attempt ${attempt}: pressing Enter on input…`);
+          await tab.keyboard.press("Enter");
+        } else {
+          // Fallback: click the submit button
+          const BTN_SEL = '[data-testid="zip-code-continue-button"], #zipSubmitButton';
+          const clicked = await tab.click(BTN_SEL).then(() => true).catch(() => false);
+          if (!clicked) {
+            // Last resort: evaluate-based submit
+            await tab.evaluate(() => {
+              const btn = document.querySelector(
+                '[data-testid="zip-code-continue-button"], #zipSubmitButton'
+              ) as HTMLElement | null;
+              if (btn) { btn.click(); return; }
+              const input = document.querySelector(
+                'input[name="zipCode"], input[name="zipcode"]'
+              ) as HTMLInputElement | null;
+              input?.closest("form")?.requestSubmit();
+            });
+          }
         }
       } catch (err) {
         if (!AaaCarrier.isDetachedError(err)) throw err;
-        console.log("[aaa] Zip submit: frame detached — checking if we navigated…");
+        // A detached-frame error means the submit caused a navigation —
+        // the redirect is already in progress. Give it time to settle.
+        frameDetached = true;
+        console.log("[aaa] Zip submit: frame detached — navigation in progress, waiting…");
       }
 
-      await sleep(2_000);
+
+      // When the frame detaches the redirect is actively happening.
+      // Wait long enough for the React SPA to finish loading.
+      const waitMs = frameDetached ? 5_000 : 2_000;
+      await sleep(waitMs);
+
+      // The "Continue to my AAA club" interstitial can appear right after
+      // zip submission — click it before checking hasLeftZipGate.
+      await AaaCarrier.dismissClubInterstitial(browser);
 
       if (await AaaCarrier.hasLeftZipGate(browser)) {
         console.log("[aaa] Zip gate passed after submit");
@@ -417,24 +444,23 @@ export class AaaCarrier extends BaseCarrier {
       }
     }
 
-    console.log("[aaa] Zip submit did not redirect — trying direct navigation…");
-    const liveTab = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
-    if (await this.navigatePastZipGate(liveTab, zipPageUrl)) {
-      await AaaCarrier.waitForPoliciesDashboard(browser, NAV_TIMEOUT);
+    // All 3 attempts done. The redirect may still be in-flight (slow network).
+    // Wait one extra cycle before resorting to a direct goto.
+    console.log("[aaa] Zip submit: waiting 5s for any in-flight redirect to settle…");
+    await sleep(5_000);
+
+    if (await AaaCarrier.hasLeftZipGate(browser)) {
+      console.log("[aaa] Zip gate passed (delayed redirect)");
       return;
     }
 
-    const live = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
-    const snippet = await live
-      .evaluate(() => document.body?.innerText?.substring(0, 400) ?? "")
-      .catch(() => "(page closed)");
-    throw new Error(
-      `AAA: Stuck on zip gate after submit (${AaaCarrier.safeUrl(live)}). ${snippet}`
-    );
+    console.log("[aaa] Zip submit did not redirect — trying direct navigation…");
+    await this.navigatePastZipGate(browser, zipPageUrl);
+    await AaaCarrier.waitForPoliciesDashboard(browser, NAV_TIMEOUT);
   }
 
   /** Navigate to redirectTo target after zip submit (session cookie may be set) */
-  private async navigatePastZipGate(page: Page, zipPageUrl: string): Promise<boolean> {
+  private async navigatePastZipGate(browser: Browser, zipPageUrl: string): Promise<void> {
     let target = POLICY_CLUB_POLICIES_URL;
     try {
       const parsed = new URL(zipPageUrl);
@@ -444,19 +470,40 @@ export class AaaCarrier extends BaseCarrier {
       /* use default */
     }
 
+    // Before navigating, check if the redirect already completed on its own.
+    if (await AaaCarrier.hasLeftZipGate(browser)) {
+      console.log("[aaa] Zip gate already passed — skipping goto");
+      return;
+    }
+
     console.log(`[aaa] Zip gate fallback goto: ${target}`);
+
+    // Find the best live tab to drive. Prefer the one that's currently transitioning
+    // (i.e. was on policy-zip and is now mid-redirect to /policies).
+    const pages = await AaaCarrier.safeBrowserPages(browser);
+    const candidate =
+      pages.find(p => {
+        const u = AaaCarrier.safeUrl(p);
+        return u.includes("mypolicy.csaa-insurance.aaa.com");
+      }) ?? pages.find(p => !p.isClosed());
+
+    if (!candidate) {
+      throw new Error("AAA: No live browser tab found for zip gate fallback navigation");
+    }
+
     try {
-      await page.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+      await candidate.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
     } catch (err) {
       if (!AaaCarrier.isDetachedError(err)) throw err;
-      const browser = page.browser();
-      const fresh = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
-      await fresh.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+      // Tab is still mid-redirect — wait for it to settle naturally.
+      console.log("[aaa] Zip gate fallback goto: frame detached — waiting for redirect to settle…");
+      await sleep(5_000);
+      if (!await AaaCarrier.hasLeftZipGate(browser)) {
+        // Last resort: find the freshest tab and navigate.
+        const fresh = await AaaCarrier.resolveActiveMypolicyTab(browser, candidate);
+        await fresh.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT }).catch(() => {});
+      }
     }
-    const tab = page.isClosed()
-      ? await AaaCarrier.resolveActiveMypolicyTab(page.browser(), page)
-      : page;
-    return !AaaCarrier.safeUrl(tab).includes("policy-zip");
   }
 
   /** Wait until policy-zip redirects to /policies or View details appears */
@@ -560,6 +607,9 @@ export class AaaCarrier extends BaseCarrier {
         continue;
       }
 
+      // Dismiss the "Continue to my AAA club" interstitial on any tab
+      await AaaCarrier.dismissClubInterstitial(browser);
+
       if (Date.now() - lastLogAt > 5_000) {
         const tabs = await AaaCarrier.safeBrowserPages(browser);
         console.log(
@@ -613,6 +663,10 @@ export class AaaCarrier extends BaseCarrier {
     if (timeoutMs <= 0) return false;
 
     await tab.setJavaScriptEnabled(true).catch(() => {});
+
+    // Dismiss the "Continue to my AAA club" interstitial if it appears
+    // before the policies list renders.
+    await AaaCarrier.dismissClubInterstitial(tab.browser()).catch(() => {});
 
     const tryWait = async (ms: number): Promise<boolean> =>
       tab
@@ -918,6 +972,26 @@ export class AaaCarrier extends BaseCarrier {
       }
     }
     return false;
+  }
+
+  /**
+   * Dismiss the "Continue to my AAA club" interstitial dialog on any open tab.
+   * This modal appears after zip gate submission and blocks the /policies page.
+   */
+  private static async dismissClubInterstitial(browser: Browser): Promise<void> {
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      try {
+        const btn = await tab.$(SEL_CLUB_INTERSTITIAL).catch(() => null);
+        if (btn) {
+          console.log(`[aaa] Dismissing 'Continue to my AAA club' interstitial on ${AaaCarrier.safeUrl(tab)}`);
+          await btn.click();
+          await sleep(1_000);
+          return;
+        }
+      } catch {
+        /* detached tab — skip */
+      }
+    }
   }
 
   private static async findPolicyZipTab(browser: Browser): Promise<Page | null> {
