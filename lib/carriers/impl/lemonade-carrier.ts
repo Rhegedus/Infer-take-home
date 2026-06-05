@@ -237,56 +237,58 @@ export class LemonadeCarrier extends BaseCarrier {
   protected async fetchDocuments(page: Page): Promise<DocumentResult["documents"]> {
     await this.progress("Selecting your policy…");
     
-    let policyCardFound = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        // Wait for the policy card selector to be rendered
         await page.waitForSelector(SELECTORS.policyCard, {
           visible: true,
           timeout: 8_000,
         });
-        policyCardFound = true;
-        break;
+
+        await LemonadeCarrier.dismissCookieBanner(page);
+
+        // Intercept window.open so we can capture the URL the policy card would
+        // open in a new tab, then navigate the MAIN page there instead.
+        //
+        // Browserless assigns a very short lifetime to popup/child tabs — they are
+        // often reaped before Page.printToPDF can finish. By staying on the primary
+        // session page we avoid that problem entirely.
+        await page.evaluate(() => {
+          (window as any).__capturedPolicyUrl = null;
+          window.open = (url?: string | URL) => {
+            if (url) {
+              (window as any).__capturedPolicyUrl = url.toString();
+            }
+            return null;
+          };
+        });
+
+        await this.progress("Opening policy declarations page…");
+
+        // Click the policy card — wrapping it in a try/catch in case the SPA
+        // navigates the main frame immediately, destroying the context.
+        try {
+          await page.click(SELECTORS.policyCard);
+        } catch (clickErr: any) {
+          const clickMsg = String(clickErr?.message || clickErr);
+          const isClickDetached = clickMsg.includes("detached") || clickMsg.includes("Frame") || clickMsg.includes("closed");
+          if (!isClickDetached) {
+            throw clickErr;
+          }
+          console.log("[lemonade] page.click policyCard threw page navigation/detachment error. Proceeding to URL check...");
+        }
+
+        break; // Successfully completed setup without uncaught detached frame error!
       } catch (err: any) {
         const msg = String(err?.message || err);
-        const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("Session closed");
+        const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("closed") || msg.includes("destroyed") || msg.includes("disposed");
         if (isDetached && attempt < 3) {
-          console.log(`[lemonade] policyCard waitForSelector: frame detached/session closed on attempt ${attempt}. Retrying in 2s...`);
-          await new Promise(r => setTimeout(r, 2000));
+          console.log(`[lemonade] policyCard click/setup failed due to frame detachment/session closed (attempt ${attempt}). Retrying in 2s...`);
+          await new Promise(r => setTimeout(r, 2e3));
           continue;
         }
         throw err;
       }
-    }
-
-    await LemonadeCarrier.dismissCookieBanner(page);
-
-    await this.progress("Opening policy declarations page…");
-
-    // Intercept window.open so we can capture the URL the policy card would
-    // open in a new tab, then navigate the MAIN page there instead.
-    //
-    // Browserless assigns a very short lifetime to popup/child tabs — they are
-    // often reaped before Page.printToPDF can finish. By staying on the primary
-    // session page we avoid that problem entirely.
-    await page.evaluate(() => {
-      (window as any).__capturedPolicyUrl = null;
-      window.open = (url?: string | URL) => {
-        if (url) {
-          (window as any).__capturedPolicyUrl = url.toString();
-        }
-        return null;
-      };
-    });
-
-    try {
-      await page.click(SELECTORS.policyCard);
-    } catch (err: any) {
-      const msg = String(err?.message || err);
-      const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("closed");
-      if (!isDetached) {
-        throw err;
-      }
-      console.log("[lemonade] page.click policyCard threw page navigation/detachment error. Proceeding to check URL...");
     }
 
     // Give the click handler up to 5s to call window.open or navigate the page
