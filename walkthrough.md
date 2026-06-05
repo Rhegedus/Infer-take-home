@@ -21,6 +21,22 @@ During this pairing session, we approached debugging systematically to stabilize
 
 ---
 
+## 🛡️ Fingerprinting & Anti-Bot Detection
+
+Carrier portals (like AAA/Okta and Lemonade) run active anti-bot detection and Web Application Firewalls (WAFs like Cloudflare or Akamai). We implemented several techniques to bypass these checks:
+
+1. **Active CDP Script Emulation**:
+   - We explicitly enable JavaScript and issue CDP session commands (`Emulation.setScriptExecutionDisabled` set to `false`) in [base-carrier.ts](file:///Users/robert/Documents/GitHub/infer-fde-takehome/lib/carriers/base-carrier.ts#L352-L353). This ensures script-less bot traps are bypassed, allowing the browser to register as a real interactive user agent.
+2. **Pre-Navigation Cookie Seeding**:
+   - Rather than waiting for cookie consent banners to render and programmatically clicking them (which triggers layout shifts, WAF telemetry flags, and blocks click targets), we seed the browser's cookies using `page.setCookie()` *before* triggering the initial navigation. For Lemonade, seeding `_lmnd_cookie_banner_accepted` prevents the consent manager overlay from mounting entirely.
+3. **Session Cookie Extraction & Node.js Fetch**:
+   - Clicking a PDF link and letting Chromium download it, or calling `page.pdf()`, is highly brittle and often triggers CORS/download-prompt blockages in headless environments.
+   - **Trade-off**: Instead, we extract the browser's authenticated session cookies (`page.cookies()`) and forward them alongside the exact matching `User-Agent` and `Referer` headers using a native Node.js `fetch` request. This bypasses browser-side download dialogues and CORS policies, making the document request indistinguishable from the active browser session.
+4. **Stealth Launch Arguments**:
+   - Configured local browser launches to include sandboxing bypasses (`--no-sandbox`, `--disable-setuid-sandbox`, and `--disable-dev-shm-usage`) to avoid permission checks in Docker. When running remotely, Browserless handles headless stealth parameters automatically to hide Puppeteer signatures (like `navigator.webdriver` flags).
+
+---
+
 ## Changes Made
 
 ### 🚗 [aaa-carrier.ts](file:///Users/robert/Documents/GitHub/infer-fde-takehome/lib/carriers/impl/aaa-carrier.ts)
