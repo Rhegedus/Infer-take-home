@@ -108,3 +108,14 @@ When running in production/Vercel, the browser connection to Browserless.io woul
 ### The Solution
 * **Heartbeat Ping**: We updated the `awaitMfaCode` polling loop to execute `await this.browser.version()` on every iteration. This sends a lightweight command over the WebSocket connection, acting as a heartbeat that prevents idle timeouts.
 * **Configurable Session Timeout**: We avoided hardcoding a default `&timeout=300000` (5 minutes) query parameter in code. Hardcoding it causes Browserless to reject the connection with a `400 Bad Request` if the user is on the Free plan (which has a strict 60-second limit). Instead, we let users configure the `timeout` parameter manually by appending `&timeout=300000` to their `BROWSERLESS_WS_ENDPOINT` environment variable on Vercel if their billing plan supports it.
+
+---
+
+## 🌐 8. Carrier Singleton Concurrency Hazard
+
+### The Challenge
+Initially, the carrier instances (`CARRIERS`) were instantiated once at the module level in `app/api/carriers/run/route.ts` and reused across all requests as singletons.
+Since `BaseCarrier` stores the active Puppeteer `browser` and `currentSessionId` as instance properties, starting a new extraction session or retrying a failed session while another background promise was still executing would overwrite these properties. The old session would then accidentally run commands on the new session's browser, or the new session's browser would be closed prematurely when the old session's `finally` block called `closeBrowser()`. This caused transient `Session closed` and `detached Frame` errors.
+
+### The Solution
+We refactored `app/api/carriers/run/route.ts` to dynamically instantiate `AaaCarrier` or `LemonadeCarrier` **per request** instead of reusing global singletons. This isolates the browser context, session IDs, and Puppeteer commands entirely to each session run.

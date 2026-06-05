@@ -10,15 +10,6 @@ const redis = Redis.fromEnv();
 const WS    = process.env.BROWSERLESS_WS_ENDPOINT ?? "";
 
 /**
- * Registry — add carriers here as they are implemented.
- * Instantiated once at module load; BaseCarrier holds no per-session state.
- */
-const CARRIERS: Record<string, BaseCarrier> = {
-  aaa:      new AaaCarrier(redis,      { browserlessWsEndpoint: WS }),
-  lemonade: new LemonadeCarrier(redis, { browserlessWsEndpoint: WS }),
-};
-
-/**
  * POST /api/carriers/run
  *
  * Body: { carrierId: "aaa" | "lemonade"; credentials: Record<string, string> }
@@ -42,13 +33,17 @@ export async function POST(req: NextRequest) {
     credentials: Record<string, string>;
   };
 
-  const carrier = CARRIERS[carrierId];
-
-  if (!carrier) {
+  // Instantiate carrier per session to prevent state conflicts
+  let carrier: BaseCarrier;
+  if (carrierId === "aaa") {
+    carrier = new AaaCarrier(redis, { browserlessWsEndpoint: WS });
+  } else if (carrierId === "lemonade") {
+    carrier = new LemonadeCarrier(redis, { browserlessWsEndpoint: WS });
+  } else {
     return NextResponse.json(
       {
         error: `Unknown carrier "${carrierId}". ` +
-               `Valid options: ${Object.keys(CARRIERS).join(", ")}`,
+               `Valid options: aaa, lemonade`,
       },
       { status: 422 }
     );
