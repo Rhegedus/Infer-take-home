@@ -271,6 +271,11 @@ export abstract class BaseCarrier {
         return code;
       }
 
+      // Ping Browserless to prevent idle connection timeout during the MFA wait period
+      if (this.browser) {
+        await this.browser.version().catch(() => {});
+      }
+
       await sleep(this.config.mfaPollIntervalMs);
     }
 

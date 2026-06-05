@@ -90,4 +90,19 @@ On Vercel, serverless function instances are immediately frozen or suspended as 
 * We wrapped the background extraction promise inside `after()`. This explicitly registers the task with the Next.js runtime, ensuring Vercel keeps the execution context alive and active after sending the response to the client.
 * We also exported `maxDuration = 300` in the route handler to configure Vercel's timeout limit to 5 minutes to accommodate the full extraction flow.
 
-.
+### Lesson Learned: Vercel Immutable Preview URLs
+* When deploying on Vercel via Git integration, every commit generates a **unique, immutable preview deployment URL** (e.g., containing a hash like `-if27e4cmo-`).
+* Accessing an older preview URL runs a frozen snapshot of the code from that exact past commit, which will not receive updates from subsequent pushes. To verify updates, always use the main branch/production domain or grab the latest deployment link from the Vercel dashboard.
+
+---
+
+## 🌐 7. Browserless Session & Idle Connection Timeouts
+
+### The Challenge
+When running in production/Vercel, the browser connection to Browserless.io would occasionally drop with `Session closed. Most likely the page has been closed.` when executing commands post-MFA. This was caused by two distinct timeout mechanisms:
+1. **Idle Connection Timeout**: During the `AWAITING_MFA` phase, the Node.js process is polling Redis for several minutes without sending any commands to the browser. Load balancers or Browserless themselves close the WebSocket due to inactivity if no data flows for 30 seconds.
+2. **Session Timeout**: Browserless has default session lifetime limits (like 60 seconds on the Free plan, or standard limits on other tiers) that terminate the container early if not configured otherwise.
+
+### The Solution
+* **Heartbeat Ping**: We updated the `awaitMfaCode` polling loop to execute `await this.browser.version()` on every iteration. This sends a lightweight command over the WebSocket connection, acting as a heartbeat that prevents idle timeouts.
+* **Explicit Session Timeout**: We updated `browserlessWsWithLaunch` to automatically append `&timeout=300000` (5 minutes) to the Browserless connection string if it is not already specified, matching our Next.js execution budget.
