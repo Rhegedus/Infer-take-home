@@ -293,7 +293,13 @@ export abstract class BaseCarrier {
         executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       });
     } else {
-      const wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
+      let wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
+      // Append default 5-minute timeout query parameter to keep paid-tier sessions alive
+      if (!wsEndpoint.includes("timeout=")) {
+        const url = new URL(wsEndpoint);
+        url.searchParams.set("timeout", "300000"); // 5 minutes
+        wsEndpoint = url.toString();
+      }
       
       let attempts = 0;
       const maxAttempts = 3;
@@ -313,10 +319,20 @@ export abstract class BaseCarrier {
           console.log("[BaseCarrier] Connected to Browserless successfully.");
           break; // Connected successfully
         } catch (err: any) {
-          attempts++;
           let errMsg = err?.message || err?.error?.message || String(err);
           if (errMsg === "[object Object]" && err?.error) errMsg = String(err.error);
           
+          // If the server rejects the 5-minute timeout (e.g. 400 error on Browserless Free tier),
+          // remove the timeout parameter and retry immediately without counting as a failed attempt.
+          if (errMsg.includes("400") && wsEndpoint.includes("timeout=")) {
+            console.warn("[BaseCarrier] Browserless rejected the timeout parameter (likely Free tier limit). Retrying connection without timeout...");
+            const url = new URL(wsEndpoint);
+            url.searchParams.delete("timeout");
+            wsEndpoint = url.toString();
+            continue;
+          }
+
+          attempts++;
           if (attempts >= maxAttempts) {
             throw new Error(`Failed to connect to Browserless after ${maxAttempts} attempts. Last error: ${errMsg}`);
           }

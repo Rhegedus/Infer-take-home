@@ -308,7 +308,24 @@ export class LemonadeCarrier extends BaseCarrier {
     await this.progress("Loading policy declarations page…");
 
     // Navigate the main page (primary Browserless session) directly to the policy URL.
-    await page.goto(policyUrl, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+    try {
+      await page.goto(policyUrl, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("disposed");
+      if (isDetached) {
+        console.log("[lemonade] page.goto policyUrl: frame detached — waiting 5s for client-side navigation to settle…");
+        await new Promise(r => setTimeout(r, 5_000));
+        const currentUrl = page.url();
+        if (currentUrl.includes("/policy/")) {
+          console.log(`[lemonade] Client-side navigation settled on: ${currentUrl}`);
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
 
     // Wait for the policy page to finish rendering (SPA data-loading guard).
     await page
