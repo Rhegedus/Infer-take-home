@@ -294,9 +294,18 @@ export abstract class BaseCarrier {
       const maxAttempts = 3;
       while (attempts < maxAttempts) {
         try {
-          this.browser = await puppeteer.connect({
+          console.log(`[BaseCarrier] Connecting to Browserless (attempt ${attempts + 1})...`);
+          
+          const connectPromise = puppeteer.connect({
             browserWSEndpoint: wsEndpoint,
           });
+          
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Connection to Browserless timed out after 15s")), 15_000)
+          );
+          
+          this.browser = await Promise.race([connectPromise, timeoutPromise]);
+          console.log("[BaseCarrier] Connected to Browserless successfully.");
           break; // Connected successfully
         } catch (err: any) {
           attempts++;

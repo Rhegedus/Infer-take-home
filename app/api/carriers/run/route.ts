@@ -66,10 +66,14 @@ export async function POST(req: NextRequest) {
   // This maintains your existing, stable session lifecycle.
   const { sessionId, promise } = await carrier.start(credentials);
 
+  console.log(`[run][${sessionId}] Registering background execution via after()`);
+
   // Keep the Vercel context alive until the background browser execution completes.
   after(async () => {
+    console.log(`[after][${sessionId}] Starting background execution...`);
     try {
       await promise;
+      console.log(`[after][${sessionId}] Background execution complete.`);
     } catch (err) {
       console.error(`[after][${sessionId}] background job failed:`, err);
     }
