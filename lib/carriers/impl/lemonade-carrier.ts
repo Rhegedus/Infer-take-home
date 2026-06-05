@@ -268,22 +268,26 @@ export class LemonadeCarrier extends BaseCarrier {
     // Browserless assigns a very short lifetime to popup/child tabs — they are
     // often reaped before Page.printToPDF can finish. By staying on the primary
     // session page we avoid that problem entirely.
-    let capturedPolicyUrl: string | null = null;
-    await page.exposeFunction("__lmndCaptureOpen", (url: string) => {
-      capturedPolicyUrl = url;
-    });
     await page.evaluate(() => {
+      (window as any).__capturedPolicyUrl = null;
       window.open = (url?: string | URL) => {
-        if (url) (window as any).__lmndCaptureOpen(url.toString());
+        if (url) {
+          (window as any).__capturedPolicyUrl = url.toString();
+        }
         return null;
       };
     });
 
     await page.click(SELECTORS.policyCard);
 
-    // Give the click handler up to 5 s to call window.open
+    // Give the click handler up to 5s to call window.open
+    let capturedPolicyUrl: string | null = null;
     const openDeadline = Date.now() + 5_000;
-    while (!capturedPolicyUrl && Date.now() < openDeadline) {
+    while (Date.now() < openDeadline) {
+      capturedPolicyUrl = await page.evaluate(() => (window as any).__capturedPolicyUrl);
+      if (capturedPolicyUrl) {
+        break;
+      }
       await new Promise(r => setTimeout(r, 200));
     }
 
