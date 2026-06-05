@@ -2,707 +2,1137 @@ import { Browser, ElementHandle, Frame, Page } from "puppeteer-core";
 import { BaseCarrier } from "../base-carrier";
 import { CarrierState, DocumentResult } from "../types";
 
-// ─── URLs (manual flow reference) ─────────────────────────────────────────────
-const MWG_INSURANCE_URL =
-  "https://mwg.aaa.com/my-account/insurance";
+// ─── Exact URLs from manual flow ──────────────────────────────────────────────
+const MWG_SIGN_IN_URL = "https://mwg.aaa.com/my-account/insurance";
 const POLICY_CLUB_POLICIES_URL =
-  "https://mypolicyclub.digital.csaa-insurance.aaa.com/policies";
+  "https://www.mypolicy.csaa-insurance.aaa.com/policies";
 
-// ─── Selectors ────────────────────────────────────────────────────────────────
-const SELECTORS = {
-  emailInput: "input[name=\"username\"]",
-  continueButton: 'button[data-action-button-primary="true"]',
-  passwordInput: 'input[name="password"]',
-  signInButton: "button._button-login-password",
-  insuranceLink:
-    'a[href="/my-account/insurance"], a[data-discover="true"][href="/my-account/insurance"]',
-  managePolicyLink:
-    'a[href*="mypolicyclub"][href*="/policies"], a[href*="csaa-insurance.aaa.com"][href*="/policies"], a.link-text-arrow[href*="/policies"], a[target="_blank"][href*="/policies"]',
-  oktaSendCode: 'input[value="Send me the code"]',
-  mfaInput: 'input[name="answer"]',
-  mfaVerify: 'input[value="Verify"]',
-  dashboardText: "p.MuiTypography-body1",
-  policyDetailsBtn: 'a[data-testid^="view-policy-details-button-"]',
-  declarationsChip: "span.MuiChip-labelMedium",
-} as const;
+// ─── MWG sign-in selectors ────────────────────────────────────────────────────
+const SEL_EMAIL = 'input[name="username"]';
+const SEL_CONTINUE = 'button[data-action-button-primary="true"]';
+const SEL_PASSWORD = 'input[name="password"]';
+const SEL_SIGN_IN = "button._button-login-password";
 
-const OKTA_SEND_CODE_SELECTORS = [
-  SELECTORS.oktaSendCode,
-  'input[data-type="save"][value="Send me the code"]',
-] as const;
+// ─── Okta selectors ───────────────────────────────────────────────────────────
+const SEL_OKTA_SEND_CODE = 'input[value="Send me the code"]';
+const SEL_OKTA_CODE_INPUT =
+  'input[name="answer"], input[name="credentials.passcode"], input[autocomplete="one-time-code"], input[type="tel"][name="answer"]';
+const SEL_OKTA_VERIFY = 'input[value="Verify"], input[data-type="save"][value="Verify"]';
+/** AAA email-verify form uses input[name="answer"] */
+const SEL_OKTA_ANSWER = 'input[name="answer"]';
 
-const OKTA_INPUT_SELECTORS = [
-  SELECTORS.mfaInput,
-  'input[type="tel"][name="answer"]',
-  'input[name="credentials.passcode"]',
-  'input[autocomplete="one-time-code"]',
-  '[data-se="o-form-input-passcode"] input',
-  '[data-se="o-form-input-credentials.passcode"] input',
-  ".okta-form-input-field input",
-] as const;
+// ─── Policy club selectors (exact from manual flow) ───────────────────────────
+// data-testid="view-policy-details-button-CAAS202509246" href="/policy/CAAS202509246"
+const SEL_VIEW_DETAILS = 'a[data-testid^="view-policy-details-button-"]';
 
-const OKTA_VERIFY_SELECTORS = [
-  SELECTORS.mfaVerify,
-  'input[data-type="save"][value="Verify"]',
-] as const;
+// data-testid="viewDocumentsButton" href="/documents/CAAS202509246"
+const SEL_VIEW_DOCUMENTS = 'a[data-testid="viewDocumentsButton"]';
 
-const OKTA_HOST_URL = /\.okta\.com/i;
-const POLICY_CLUB_URL = /csaa-insurance\.aaa\.com|mypolicyclub/i;
+// data-testid="Auto-Declaration-Page-link" href="blob:..." target="_blank"
+const SEL_AUTO_DECLARATION = 'a[data-testid="Auto-Declaration-Page-link"]';
 
-const DOM_TRANSITION_TIMEOUT = 15_000;
-const NAVIGATION_TIMEOUT = 30_000;
+const NAV_TIMEOUT = 30_000;
+const DOM_TIMEOUT = 15_000;
 const OKTA_SUBMIT_TIMEOUT = 45_000;
-const TOTAL_STEPS = 6;
 
-const OKTA_PASSCODE_SELECTOR =
-  '#okta-sign-in input[name="answer"], input[name="answer"], input[type="tel"][name="answer"], input[name="credentials.passcode"]';
-
-const OKTA_VERIFY_BUTTON_SELECTOR =
-  '#okta-sign-in input.button.button-primary[value="Verify"], input.button-primary[value="Verify"], input[value="Verify"][data-type="save"]';
-
-/** Okta widget loaded — send-code screen OR passcode screen (not the passcode field alone). */
-const OKTA_WIDGET_SELECTOR =
-  '#okta-sign-in, #signin-container, input[value="Send me the code"], input[data-type="save"][value="Send me the code"]';
-
-type OktaDomContext = Page | Frame;
-type OktaNeed = "send-code" | "verify-input";
-
-interface OktaLoc {
-  page: Page;
-  context: OktaDomContext;
-  send?: ElementHandle<Element>;
-  input?: ElementHandle<Element>;
-  verify?: ElementHandle<Element>;
-}
+type OktaCtx = Page | Frame;
 
 /**
- * AAA extraction — explicit linear steps (no probe / navigation loops).
+ * AAA carrier — manual flow:
  *
- * 1. MWG sign-in (email → continue → password → sign in)
- * 2. Insurance account page
- * 3. Policy Club (/policies) via Manage Policy
- * 4. Okta email MFA (send code → enter code → verify) — skipped if already on dashboard
- * 5. Policy dashboard (www.mypolicy…/policies)
- * 6. Policy declarations PDF
+ * 1. MWG sign-in
+ * 2. Okta MFA (if presented after login)
+ * 3. Go to https://www.mypolicy.csaa-insurance.aaa.com/policies
+ * 4. Okta MFA (if presented for Policy Club)
+ * 5. Policies dashboard — first "View details"
+ * 6. "View documents"
+ * 7. "Auto Declaration Page" (blob PDF, target="_blank")
  */
+const TOTAL_STEPS = 7;
+
 export class AaaCarrier extends BaseCarrier {
   readonly carrierId = "aaa";
+  private _credentials: Record<string, string> = {};
+  /** Active mypolicy tab — set once we reach the policies dashboard */
+  private policyClubTab: Page | null = null;
+  private mfaRound = 0;
+  /** Avoid re-filling zip while waiting for post-submit redirect */
+  private zipGateSubmitted = false;
 
-  private mwgPage: Page | null = null;
-  private policyClubPage: Page | null = null;
-  private oktaPage: Page | null = null;
-
-  protected override resetCarrierState(): void {
-    this.mwgPage = null;
-    this.policyClubPage = null;
-    this.oktaPage = null;
+  protected override mfaAwaitingMessage(round: number): string {
+    return round > 1
+      ? "Enter the Okta verification code (required again for Policy Club)"
+      : "Enter the Okta verification code sent to your email";
   }
 
-  protected override async configurePage(page: Page): Promise<void> {
-    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
-    page.setDefaultTimeout(DOM_TRANSITION_TIMEOUT);
-  }
+  // ─── Stubs required by BaseCarrier ───────────────────────────────────────────
+  protected async login(): Promise<void> {}
+  protected async detectMfa(): Promise<boolean> { return false; }
+  protected async navigateToDocumentsArea(): Promise<void> {}
+  protected async submitMfaInBrowser(): Promise<void> {}
 
-  protected override mfaAwaitingMessage(_round: number): string {
-    return "Step 4/6: Enter the verification code sent to your email";
-  }
-
-  // ─── Linear pipeline (replaces generic MFA / navigation loops) ───────────────
-
+  // ─── Main pipeline ─────────────────────────────────────────────────────────
   protected override async runPipeline(
     sessionId: string,
     credentials: Record<string, string>
   ): Promise<DocumentResult> {
-    this.resetCarrierState();
+    const { email, password } = AaaCarrier.creds(credentials);
+    this._credentials = credentials;
+    this.mfaRound = 0;
+    this.policyClubTab = null;
+    this.zipGateSubmitted = false;
 
     await this.progress("Launching secure browser…");
     const page = await this.openBrowser();
 
-    await this.runStep(1, "Sign in on MWG (email → continue → password → sign in)", () =>
-      this.stepMwgSignIn(page, credentials)
-    );
+    // ── Step 1: MWG sign-in ─────────────────────────────────────────────────
+    await this.progress(`Step 1/${TOTAL_STEPS}: MWG sign-in…`);
+    await this.stepMwgSignIn(page, email, password);
+    await sleep(2_000);
 
-    await this.runStep(2, "Open Insurance (/my-account/insurance)", () =>
-      this.stepMwgInsurance(page)
-    );
+    // ── Step 2: Okta MFA after login (if presented) ─────────────────────────
+    await this.progress(`Step 2/${TOTAL_STEPS}: Okta MFA (after login)…`);
+    await this.stepOktaMfaIfNeeded(sessionId, page);
 
-    await this.runStep(3, "Open Policy Club (Manage Policy → /policies)", () =>
-      this.stepOpenPolicyClub(page)
-    );
+    // ── Step 3: Go to Policy Club /policies ─────────────────────────────────
+    await this.progress(`Step 3/${TOTAL_STEPS}: Opening policies…`);
+    const browser = page.browser();
+    const liveTab = await AaaCarrier.resolveLivePolicyTab(browser, page);
+    let policiesPage = await AaaCarrier.safeGoto(liveTab, POLICY_CLUB_POLICIES_URL);
+    console.log(`[aaa] After policies goto, URL: ${AaaCarrier.safeUrl(policiesPage)}`);
 
-    await this.runStep(4, "Okta email verification (if required)", () =>
-      this.stepOktaEmailMfa(sessionId, page)
-    );
+    // Redirect to Okta or zip gate can lag behind domcontentloaded
+    await AaaCarrier.waitForOktaOrPolicyClub(browser, NAV_TIMEOUT);
+    policiesPage = await AaaCarrier.resolveActiveMypolicyTab(browser, policiesPage);
 
-    await this.runStep(5, "Wait for policy dashboard", () =>
-      this.stepWaitPolicyDashboard(page)
-    );
+    // Zip gate — poll until the React form is actually rendered (short wait; may appear later)
+    policiesPage = await this.stepWaitAndHandleZipGate(browser, policiesPage, 15_000);
 
-    await this.progress(`Step ${TOTAL_STEPS}/${TOTAL_STEPS}: Download policy declarations`);
-    const documents = await this.fetchDocumentsWithTransition(sessionId, page);
+    // ── Step 4: Okta MFA for Policy Club (if presented) ─────────────────────
+    await this.progress(`Step 4/${TOTAL_STEPS}: Okta MFA (Policy Club)…`);
+    await this.stepOktaMfaIfNeeded(sessionId, policiesPage);
+
+    // Zip may only appear after Okta — wait longer here
+    policiesPage = await this.stepWaitAndHandleZipGate(browser, policiesPage, 60_000);
+
+    // ── Step 5: Policies dashboard (handles late Okta / zip) ─────────────────
+    await this.progress(`Step 5/${TOTAL_STEPS}: Policies dashboard…`);
+    const policiesTab = await this.stepEnsureOnPolicies(sessionId, policiesPage);
+
+    let documentsTab = policiesTab;
+    let policyId: string | null = null;
+
+    // ── Step 6: View details → View documents (skip if already on documents) ─
+    if (await AaaCarrier.isDocumentsReady(policiesTab)) {
+      console.log("[aaa] Already on documents page — skipping View details / View documents");
+    } else {
+      await this.progress(`Step 6/${TOTAL_STEPS}: Opening policy documents…`);
+      const details = await this.stepClickViewDetails(policiesTab);
+      policyId = details.policyId;
+      documentsTab = await this.stepClickViewDocuments(details.tab);
+    }
+
+    // ── Step 7: Auto Declaration PDF ─────────────────────────────────────────
+    await this.progress(`Step 7/${TOTAL_STEPS}: Downloading Auto Declaration PDF…`);
+    await this.store.transition(sessionId, CarrierState.FETCHING_DOCS, {
+      statusMessage: "Downloading Auto Declaration PDF…",
+    });
+    const documents = await this.stepDownloadDeclaration(documentsTab, policyId, sessionId);
+
     return this.finalizeDocuments(sessionId, documents);
   }
 
-  // ─── BaseCarrier stubs (pipeline is overridden) ─────────────────────────────
-
-  protected async login(): Promise<void> {}
-  protected async detectMfa(): Promise<boolean> {
-    return false;
-  }
-  protected async navigateToDocumentsArea(): Promise<void> {}
-  protected async submitMfaInBrowser(): Promise<void> {}
-
-  // ─── Step 1: MWG sign-in ────────────────────────────────────────────────────
-
+  // ─── Step 1: MWG sign-in ───────────────────────────────────────────────────
   private async stepMwgSignIn(
     page: Page,
-    credentials: Record<string, string>
+    email: string,
+    password: string
   ): Promise<void> {
-    const { email, password } = AaaCarrier.extractCredentials(credentials);
-
-    await page.goto(MWG_INSURANCE_URL, { waitUntil: "domcontentloaded" });
-    this.mwgPage = page;
-
-    const needsLogin = await page
-      .waitForSelector(SELECTORS.emailInput, { visible: true, timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-
-    if (!needsLogin) return;
-
-    await page.waitForSelector(SELECTORS.emailInput, { visible: true });
-    await page.type(SELECTORS.emailInput, email, { delay: 40 });
-    await page.click(SELECTORS.continueButton);
-
-    await page.waitForSelector(SELECTORS.passwordInput, {
-      visible: true,
-      timeout: DOM_TRANSITION_TIMEOUT,
-    });
-    await page.type(SELECTORS.passwordInput, password, { delay: 40 });
-
-    await Promise.all([
-      page
-        .waitForNavigation({
-          waitUntil: "domcontentloaded",
-          timeout: NAVIGATION_TIMEOUT,
-        })
-        .catch(() => {}),
-      page.click(SELECTORS.signInButton),
-    ]);
-  }
-
-  // ─── Step 2: Insurance ────────────────────────────────────────────────────────
-
-  private async stepMwgInsurance(page: Page): Promise<void> {
-    const mwg = this.mwgPage ?? page;
-
-    if (await AaaCarrier.isMwgInsuranceReady(mwg)) return;
-
-    const hasInsuranceNav = await mwg
-      .waitForSelector(SELECTORS.insuranceLink, { visible: true, timeout: 8_000 })
-      .then(() => true)
-      .catch(() => false);
-
-    if (hasInsuranceNav) {
-      await this.progress("Step 2/6: Clicking Insurance in account menu…");
-      await mwg.click(SELECTORS.insuranceLink);
-      await mwg
-        .waitForNavigation({ waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT })
-        .catch(() => {});
-      if (await AaaCarrier.isMwgInsuranceReady(mwg)) return;
-    }
-
-    await this.progress("Step 2/6: Opening Insurance page directly…");
-    await mwg.goto(MWG_INSURANCE_URL, {
+    await page.goto(MWG_SIGN_IN_URL, {
       waitUntil: "domcontentloaded",
-      timeout: NAVIGATION_TIMEOUT,
+      timeout: NAV_TIMEOUT,
     });
 
-    await AaaCarrier.waitForMwgInsuranceReady(mwg, NAVIGATION_TIMEOUT);
-  }
+    // Check if login form is present
+    const needsLogin = await page
+      .waitForSelector(SEL_EMAIL, { visible: true, timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
 
-  // ─── Step 3: Policy Club ────────────────────────────────────────────────────
-
-  private async stepOpenPolicyClub(page: Page): Promise<void> {
-    const mwg = this.mwgPage ?? page;
-    const browser = mwg.browser();
-
-    await this.progress("Step 3/6: Finding Manage Policy link…");
-    const href = await AaaCarrier.resolveManagePolicyHref(mwg);
-
-    await mwg.waitForSelector(SELECTORS.managePolicyLink, {
-      visible: true,
-      timeout: NAVIGATION_TIMEOUT,
-    });
-
-    const pagesBefore = await AaaCarrier.safeBrowserPages(browser);
-
-    await this.progress("Step 3/6: Clicking Manage Policy…");
-    await mwg.click(SELECTORS.managePolicyLink).catch(() => {});
-
-    let clubTab = await AaaCarrier.waitForNewPolicyClubTab(
-      browser,
-      pagesBefore,
-      10_000
-    );
-
-    if (!clubTab) {
-      await this.progress("Step 3/6: Opening policies URL directly…");
-      clubTab = await browser.newPage();
-      await AaaCarrier.navigatePolicyClubTab(clubTab, href);
-    } else {
-      await this.progress("Step 3/6: Waiting for Policy Club to load…");
-      await AaaCarrier.waitForTabReachAuth(clubTab, NAVIGATION_TIMEOUT);
-    }
-
-    this.policyClubPage = clubTab;
-
-    const oktaTab = await AaaCarrier.findOktaTab(browser);
-    if (oktaTab) this.oktaPage = oktaTab;
-    else if (OKTA_HOST_URL.test(AaaCarrier.safeUrl(clubTab))) {
-      this.oktaPage = clubTab;
-    }
-  }
-
-  // ─── Step 4: Okta MFA ───────────────────────────────────────────────────────
-
-  private async stepOktaEmailMfa(sessionId: string, page: Page): Promise<void> {
-    const browser = (this.mwgPage ?? page).browser();
-
-    const alreadyOnDashboard = await AaaCarrier.findDashboardTab(browser);
-    if (alreadyOnDashboard) {
-      this.policyClubPage = alreadyOnDashboard;
+    if (!needsLogin) {
+      console.log("[aaa] Already signed in to MWG — skipping sign-in");
       return;
     }
 
-    let oktaTab =
-      this.oktaPage ??
-      (await AaaCarrier.findOktaTab(browser)) ??
-      this.policyClubPage;
+    console.log("[aaa] Typing email…");
+    await page.type(SEL_EMAIL, email, { delay: 40 });
+    await page.click(SEL_CONTINUE);
 
-    if (!oktaTab) {
-      throw await AaaCarrier.stepError(4, "No Okta tab found", browser);
+    console.log("[aaa] Typing password…");
+    await page.waitForSelector(SEL_PASSWORD, { visible: true, timeout: DOM_TIMEOUT });
+    await page.type(SEL_PASSWORD, password, { delay: 40 });
+
+    await Promise.all([
+      page
+        .waitForNavigation({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT })
+        .catch(() => {}),
+      page.click(SEL_SIGN_IN),
+    ]);
+
+    console.log(`[aaa] After sign-in, URL: ${page.url()}`);
+  }
+
+  // ─── Step 2b: Zip code gate ─────────────────────────────────────────────────
+  /**
+   * Handles two zip code gate variants:
+   *  1. https://www.mypolicy.csaa-insurance.aaa.com/policy-zip?redirectTo=...
+   *     input: name="zipCode", data-testid="zip-code-continue-button"
+   *  2. https://csaa-insurance.aaa.com/.../manage-mypolicy.html
+   *     input: name="zipcode" id="zipcode", button id="zipSubmitButton"
+   */
+  /**
+   * Poll for policy-zip tab, wait for React form to render, then submit zip once.
+   * Returns the active mypolicy tab (may still be on zip while redirect pending).
+   */
+  private async stepWaitAndHandleZipGate(
+    browser: Browser,
+    page: Page,
+    maxWaitMs = 60_000
+  ): Promise<Page> {
+    // Already past zip gate
+    if (await AaaCarrier.hasPoliciesDashboard(browser)) {
+      return await AaaCarrier.resolveActiveMypolicyTab(browser, page);
     }
 
-    this.oktaPage = oktaTab;
-    await oktaTab.bringToFront().catch(() => {});
-    await this.progress("Step 4/6: Loading Okta verification (JavaScript required)…");
-    await AaaCarrier.ensureOktaWidgetReady(oktaTab);
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+        const url = AaaCarrier.safeUrl(tab);
+        if (!url.includes("policy-zip") && !url.includes("manage-mypolicy")) {
+          continue;
+        }
 
-    if (!(await AaaCarrier.hasOktaPasscodeInput(oktaTab))) {
-      await this.progress("Step 4/6: Clicking Send me the code…");
-      const sent = await AaaCarrier.clickOktaSendCode(oktaTab);
-      if (!sent) {
-        throw await AaaCarrier.stepError(
-          4,
-          'Could not find "Send me the code" on Okta',
-          browser
-        );
+        await tab.bringToFront().catch(() => {});
+        await tab.setJavaScriptEnabled(true).catch(() => {});
+
+        if (this.zipGateSubmitted) {
+          console.log("[aaa] Zip already submitted — waiting for redirect…");
+          const left = await this.waitForLeaveZipGate(tab, 5_000).then(() => true).catch(() => false);
+          if (left) {
+            return await AaaCarrier.resolveActiveMypolicyTab(browser, tab);
+          }
+          console.log("[aaa] Still on zip gate after waiting — resetting submitted flag to retry");
+          this.zipGateSubmitted = false;
+        }
+
+        await this.waitForZipPageReady(tab);
+        await this.progress("Entering policy zip code…");
+        await this.stepHandleZipGate(tab, this._credentials);
+        return await AaaCarrier.resolveActiveMypolicyTab(browser, tab);
       }
-      await this.progress("Step 4/6: Code sent — enter it when it arrives");
-      await AaaCarrier.waitForOktaCodeInput(oktaTab, 60_000);
-    } else {
-      await this.progress("Step 4/6: Enter the verification code sent to your email");
+
+      // Not on zip yet — keep polling (redirect can lag 30s+ behind domcontentloaded)
+      await sleep(500);
     }
 
+    return page;
+  }
+
+  /** Wait for the policy-zip SPA to render the form (blank body = not ready) */
+  private async waitForZipPageReady(tab: Page): Promise<void> {
+    const ZIP_READY_SEL =
+      'input[name="zipCode"], input[name="zipcode"], input[id="zipcode"], [data-testid="zip-code-continue-button"]';
+
+    console.log("[aaa] Waiting for zip gate page to render…");
+    await sleep(2_000);
+
+    const ready = await tab
+      .waitForSelector(ZIP_READY_SEL, { visible: true, timeout: 45_000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (ready) return;
+
+    // Blank SPA shell — reload once and wait again
+    console.log("[aaa] Zip page still blank — reloading…");
+    await tab.reload({ waitUntil: "networkidle2", timeout: NAV_TIMEOUT }).catch(() => {});
+    await tab.waitForSelector(ZIP_READY_SEL, { visible: true, timeout: 45_000 });
+  }
+
+  private async stepHandleZipGateIfPresent(page: Page): Promise<void> {
+    const url = AaaCarrier.safeUrl(page);
+    if (!url.includes("policy-zip") && !url.includes("manage-mypolicy")) return;
+    await this.waitForZipPageReady(page);
+    await this.progress("Entering policy zip code…");
+    await this.stepHandleZipGate(page, this._credentials);
+  }
+
+  private async stepHandleZipGate(
+    page: Page,
+    credentials: Record<string, string>
+  ): Promise<void> {
+    const url = AaaCarrier.safeUrl(page);
+    const isZipPage = url.includes("policy-zip") || url.includes("manage-mypolicy");
+    if (!isZipPage) return;
+
+    // Already submitted — just wait for redirect, do not re-fill
+    if (this.zipGateSubmitted) {
+      console.log("[aaa] Zip already submitted — waiting for redirect…");
+      await this.waitForLeaveZipGate(page, NAV_TIMEOUT);
+      return;
+    }
+
+    const zipCode = credentials.zipCode;
+    if (!zipCode) {
+      throw new Error(
+        `AAA: Hit zip code gate (${url}) but no zipCode credential was provided`
+      );
+    }
+
+    console.log(`[aaa] Zip gate: ${url} — entering zip: ${zipCode}`);
+
+    const ZIP_INPUT_SEL =
+      'input[name="zipCode"], input[name="zipcode"], input[id="zipcode"]';
+    const ZIP_SUBMIT_SEL =
+      '[data-testid="zip-code-continue-button"], #zipSubmitButton';
+
+    // waitForZipPageReady already ran — grab input immediately
+    const zipInput = await page.$(ZIP_INPUT_SEL).catch(() => null);
+    if (!zipInput) {
+      await this.waitForZipPageReady(page);
+    }
+
+    console.log("[aaa] Waiting for zip input…");
+    const input = await page
+      .waitForSelector(ZIP_INPUT_SEL, { visible: true, timeout: 15_000 })
+      .catch(() => null);
+
+    if (!input) {
+      const html = await page
+        .evaluate(() => document.body?.innerText?.substring(0, 300) ?? "")
+        .catch(() => "");
+      throw new Error(`AAA: Could not find zip code input on ${url}. Page: ${html}`);
+    }
+
+    console.log("[aaa] Zip input found — typing zip code…");
+    await this.fillZipInput(page, zipCode);
+
+    console.log("[aaa] Waiting for submit button to enable…");
+    await page
+      .waitForSelector(`${ZIP_SUBMIT_SEL}:not([disabled])`, {
+        visible: true,
+        timeout: 15_000,
+      })
+      .catch(() => {});
+
+    this.zipGateSubmitted = true;
+    await this.submitZipAndProceed(page, url);
+
+    console.log(`[aaa] After zip submission, URL: ${AaaCarrier.safeUrl(page)}`);
+  }
+
+  /** Human-like zip entry — works with React/MUI controlled inputs */
+  private async fillZipInput(page: Page, zipCode: string): Promise<void> {
+    const ZIP_INPUT_SEL =
+      'input[name="zipCode"], input[name="zipcode"], input[id="zipcode"]';
+
+    await page.click(ZIP_INPUT_SEL, { count: 3 });
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type(zipCode, { delay: 100 });
+    await sleep(500);
+
+    const val = await page
+      .$eval(ZIP_INPUT_SEL, (el) => (el as HTMLInputElement).value)
+      .catch(() => "");
+
+    console.log(`[aaa] Zip field value after type: "${val}"`);
+
+    if (val !== zipCode) {
+      await page.evaluate((zip) => {
+        const input = document.querySelector(
+          'input[name="zipCode"], input[name="zipcode"], input[id="zipcode"]'
+        ) as HTMLInputElement | null;
+        if (!input) return;
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value"
+        )?.set;
+        if (setter) setter.call(input, zip);
+        else input.value = zip;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }, zipCode);
+    }
+  }
+
+  /** Click Continue and wait for redirect; retry + fallback goto if needed */
+  private async submitZipAndProceed(page: Page, zipPageUrl: string): Promise<void> {
+    const browser = page.browser();
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      console.log(`[aaa] Zip submit attempt ${attempt}/3…`);
+
+      const tab =
+        (await AaaCarrier.findPolicyZipTab(browser)) ??
+        (page.isClosed() ? null : page);
+
+      if (!tab) {
+        if (await AaaCarrier.hasLeftZipGate(browser)) {
+          console.log("[aaa] Zip gate passed (tab navigated away)");
+          return;
+        }
+        await sleep(1_000);
+        continue;
+      }
+
+      try {
+        await tab.bringToFront().catch(() => {});
+        const selector = '[data-testid="zip-code-continue-button"], #zipSubmitButton';
+        const clicked = await tab.click(selector).then(() => true).catch(() => false);
+        if (!clicked) {
+          await tab.evaluate(() => {
+            const btn = document.querySelector(
+              '[data-testid="zip-code-continue-button"], #zipSubmitButton'
+            ) as HTMLElement | null;
+            if (btn) {
+              btn.click();
+              return;
+            }
+            const input = document.querySelector(
+              'input[name="zipCode"], input[name="zipcode"]'
+            ) as HTMLInputElement | null;
+            input?.closest("form")?.requestSubmit();
+          });
+        }
+      } catch (err) {
+        if (!AaaCarrier.isDetachedError(err)) throw err;
+        console.log("[aaa] Zip submit: frame detached — checking if we navigated…");
+      }
+
+      await sleep(2_000);
+
+      if (await AaaCarrier.hasLeftZipGate(browser)) {
+        console.log("[aaa] Zip gate passed after submit");
+        return;
+      }
+    }
+
+    console.log("[aaa] Zip submit did not redirect — trying direct navigation…");
+    const liveTab = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
+    if (await this.navigatePastZipGate(liveTab, zipPageUrl)) {
+      await AaaCarrier.waitForPoliciesDashboard(browser, NAV_TIMEOUT);
+      return;
+    }
+
+    const live = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
+    const snippet = await live
+      .evaluate(() => document.body?.innerText?.substring(0, 400) ?? "")
+      .catch(() => "(page closed)");
+    throw new Error(
+      `AAA: Stuck on zip gate after submit (${AaaCarrier.safeUrl(live)}). ${snippet}`
+    );
+  }
+
+  /** Navigate to redirectTo target after zip submit (session cookie may be set) */
+  private async navigatePastZipGate(page: Page, zipPageUrl: string): Promise<boolean> {
+    let target = POLICY_CLUB_POLICIES_URL;
+    try {
+      const parsed = new URL(zipPageUrl);
+      const redirectTo = parsed.searchParams.get("redirectTo");
+      if (redirectTo) target = `${parsed.origin}${redirectTo}`;
+    } catch {
+      /* use default */
+    }
+
+    console.log(`[aaa] Zip gate fallback goto: ${target}`);
+    try {
+      await page.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+    } catch (err) {
+      if (!AaaCarrier.isDetachedError(err)) throw err;
+      const browser = page.browser();
+      const fresh = await AaaCarrier.resolveActiveMypolicyTab(browser, page);
+      await fresh.goto(target, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+    }
+    const tab = page.isClosed()
+      ? await AaaCarrier.resolveActiveMypolicyTab(page.browser(), page)
+      : page;
+    return !AaaCarrier.safeUrl(tab).includes("policy-zip");
+  }
+
+  /** Wait until policy-zip redirects to /policies or View details appears */
+  private async waitForLeaveZipGate(page: Page, timeoutMs: number): Promise<void> {
+    if (await AaaCarrier.hasLeftZipGate(page.browser())) return;
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await AaaCarrier.hasLeftZipGate(page.browser())) return;
+      await sleep(500);
+    }
+
+    throw new Error(`still-on-zip:${AaaCarrier.safeUrl(page)}`);
+  }
+
+  // ─── Step 3: Okta MFA if presented ────────────────────────────────────────
+  private async stepOktaMfaIfNeeded(
+    sessionId: string,
+    page: Page
+  ): Promise<void> {
+    const browser = page.browser();
+
+    // Poll — Okta redirect after /policies can take several seconds
+    const oktaTab = await AaaCarrier.waitForOktaTab(browser, 20_000);
+    if (!oktaTab) {
+      console.log("[aaa] No Okta detected — skipping MFA");
+      return;
+    }
+
+    this.mfaRound += 1;
+    console.log(
+      `[aaa] Okta MFA detected (round ${this.mfaRound}) — tab: ${AaaCarrier.safeUrl(oktaTab)}`
+    );
+    await oktaTab.bringToFront().catch(() => {});
+
+    // Ensure JS is enabled for Okta
+    await oktaTab.setJavaScriptEnabled(true);
+
+    // Wait for the Okta widget
+    await this.waitForOktaWidget(oktaTab);
+
+    // Click "Send me the code" if not already on code entry screen
+    const hasCodeInput = await this.hasCodeInput(oktaTab);
+    if (!hasCodeInput) {
+      console.log("[aaa] Clicking 'Send me the code'…");
+      await this.clickSendCode(oktaTab);
+      console.log("[aaa] Code sent — waiting for input field…");
+      await this.waitForCodeInput(oktaTab, 30_000);
+    } else {
+      console.log("[aaa] Code input already present");
+    }
+
+    // ── PAUSE: ask user for code ────────────────────────────────────────────
     await this.store.transition(sessionId, CarrierState.AWAITING_MFA, {
-      statusMessage: this.mfaAwaitingMessage(0),
+      statusMessage: this.mfaAwaitingMessage(this.mfaRound),
     });
+    console.log(`[aaa][${sessionId}] Waiting for you to enter your verification code…`);
     const code = await this.awaitMfaCode(sessionId);
+    console.log(`[aaa][${sessionId}] Code received — entering it now…`);
 
     await this.store.transition(sessionId, CarrierState.MFA_SUBMITTED, {
-      statusMessage: "Step 4/6: Submitting verification code…",
+      statusMessage: "Submitting verification code…",
     });
 
+    // Re-find Okta tab after user wait (iframe may have reloaded) and submit in live DOM
     const freshOkta =
-      (await AaaCarrier.findOktaTab(browser)) ?? this.oktaPage ?? oktaTab;
-    await AaaCarrier.submitOktaCode(browser, freshOkta, code);
-    this.oktaPage = freshOkta;
+      (await AaaCarrier.findOktaTab(browser)) ?? oktaTab;
+    await AaaCarrier.submitOktaCode(browser, freshOkta, String(code).trim());
 
-    await AaaCarrier.waitForCondition(
-      () => AaaCarrier.findDashboardTab(browser),
-      NAVIGATION_TIMEOUT,
-      "policy dashboard after Okta verify"
+    // Wait for redirect onto policy club after verify
+    await AaaCarrier.waitForPostOktaRedirect(browser, NAV_TIMEOUT);
+  }
+
+  /** True when tab is on the documents page with the declaration link ready */
+  private static async isDocumentsReady(tab: Page): Promise<boolean> {
+    try {
+      if (!AaaCarrier.safeUrl(tab).includes("/documents")) return false;
+      return !!(await tab.$(SEL_AUTO_DECLARATION).catch(() => null));
+    } catch {
+      return false;
+    }
+  }
+
+  // ─── Step 5: Ensure we're on /policies (or documents) ──────────────────────
+  private async stepEnsureOnPolicies(sessionId: string, page: Page): Promise<Page> {
+    const browser = page.browser();
+    const deadline = Date.now() + 90_000;
+    let lastLogAt = 0;
+
+    while (Date.now() < deadline) {
+      const oktaTab = await AaaCarrier.findOktaTab(browser);
+      if (oktaTab) {
+        console.log("[aaa] Okta present — running MFA before policies dashboard…");
+        await this.stepOktaMfaIfNeeded(sessionId, oktaTab);
+        continue;
+      }
+
+      const zipTab = await AaaCarrier.findPolicyZipTab(browser);
+      if (zipTab) {
+        await this.stepWaitAndHandleZipGate(browser, zipTab, 30_000);
+        continue;
+      }
+
+      if (Date.now() - lastLogAt > 5_000) {
+        const tabs = await AaaCarrier.safeBrowserPages(browser);
+        console.log(
+          `[aaa] Waiting for View details… tabs: ${tabs.map((t) => AaaCarrier.safeUrl(t)).join(" | ")}`
+        );
+        lastLogAt = Date.now();
+      }
+
+      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+        try {
+          const url = AaaCarrier.safeUrl(tab);
+          if (!url.includes("mypolicy.csaa-insurance.aaa.com")) continue;
+          if (url.includes("policy-zip")) continue;
+
+          await tab.bringToFront().catch(() => {});
+
+          if (await AaaCarrier.isDocumentsReady(tab)) {
+            console.log(`[aaa] On documents page: ${url}`);
+            this.policyClubTab = tab;
+            return tab;
+          }
+
+          if (url.includes("/policies")) {
+            const remaining = deadline - Date.now();
+            if (await this.waitForViewDetailsOnTab(tab, remaining)) {
+              console.log(`[aaa] Policies dashboard ready: ${url}`);
+              this.policyClubTab = tab;
+              return tab;
+            }
+          }
+        } catch (err) {
+          if (AaaCarrier.isDetachedError(err)) continue;
+          throw err;
+        }
+      }
+
+      await sleep(1_000);
+    }
+
+    const target = await AaaCarrier.resolveLivePolicyTab(browser, page);
+    const snippet = await target
+      .evaluate(() => document.body?.innerText?.substring(0, 300) ?? "")
+      .catch(() => "(closed)");
+    throw new Error(
+      `AAA: Timed out waiting for View details on policies dashboard. Last page: ${snippet}`
     );
   }
 
-  // ─── Step 5: Dashboard ──────────────────────────────────────────────────────
+  /** Wait for the /policies React app to render View details links */
+  private async waitForViewDetailsOnTab(tab: Page, timeoutMs: number): Promise<boolean> {
+    if (timeoutMs <= 0) return false;
 
-  private async stepWaitPolicyDashboard(page: Page): Promise<void> {
-    const browser = (this.mwgPage ?? page).browser();
-    const dash = await AaaCarrier.waitForCondition(
-      () => AaaCarrier.findDashboardTab(browser),
-      NAVIGATION_TIMEOUT,
-      "policy dashboard (View policies / View details)"
-    );
-    this.policyClubPage = dash;
+    await tab.setJavaScriptEnabled(true).catch(() => {});
+
+    const tryWait = async (ms: number): Promise<boolean> =>
+      tab
+        .waitForSelector(SEL_VIEW_DETAILS, { visible: true, timeout: ms })
+        .then(() => true)
+        .catch(() => false);
+
+    if (await tryWait(Math.min(20_000, timeoutMs))) return true;
+
+    const bodyLen = await tab
+      .evaluate(() => document.body?.innerText?.trim().length ?? 0)
+      .catch(() => 0);
+
+    if (bodyLen < 30) {
+      console.log("[aaa] Policies page empty — waiting for network, then reload…");
+      await tab
+        .waitForNavigation({ waitUntil: "networkidle2", timeout: 15_000 })
+        .catch(() => {});
+      await sleep(2_000);
+      await tab.reload({ waitUntil: "networkidle2", timeout: NAV_TIMEOUT }).catch(() => {});
+      await sleep(2_000);
+    }
+
+    const remaining = Math.max(5_000, timeoutMs - 5_000);
+    if (await tryWait(Math.min(30_000, remaining))) return true;
+
+    const snippet = await tab
+      .evaluate(() => document.body?.innerText?.substring(0, 150) ?? "")
+      .catch(() => "");
+    if (snippet) {
+      console.log(`[aaa] View details not found yet. Page: ${snippet.slice(0, 80)}…`);
+    }
+    return false;
   }
 
-  // ─── Step 6: Documents ──────────────────────────────────────────────────────
+  // ─── Step 6a: Click "View details" ─────────────────────────────────────────
+  private async stepClickViewDetails(
+    tab: Page
+  ): Promise<{ policyId: string | null; tab: Page }> {
+    console.log(`[aaa] On page: ${tab.url()}`);
 
-  protected async fetchDocuments(page: Page): Promise<DocumentResult["documents"]> {
-    const browser = (this.mwgPage ?? page).browser();
-    const club =
-      this.policyClubPage ??
-      (await AaaCarrier.findDashboardTab(browser)) ??
-      page;
-
-    await club.bringToFront().catch(() => {});
-
-    const detailsBtn = await club.waitForSelector(SELECTORS.policyDetailsBtn, {
+    // Wait for and click the FIRST "View details" link
+    const detailsLink = await tab.waitForSelector(SEL_VIEW_DETAILS, {
       visible: true,
-      timeout: NAVIGATION_TIMEOUT,
+      timeout: NAV_TIMEOUT,
     });
 
-    const policyId = await detailsBtn?.evaluate((el) =>
-      el.getAttribute("data-testid")?.replace("view-policy-details-button-", "")
+    if (!detailsLink) throw new Error("AAA: Could not find 'View details' link");
+
+    const policyId = await detailsLink.evaluate((el) =>
+      (el as HTMLAnchorElement)
+        .getAttribute("data-testid")
+        ?.replace("view-policy-details-button-", "") ?? null
     );
 
-    await detailsBtn!.click();
+    console.log(`[aaa] Clicking 'View details' for policy: ${policyId}`);
+    await detailsLink.click();
 
-    const pagesBeforePdf = await AaaCarrier.safeBrowserPages(club.browser());
-    await club.waitForSelector(SELECTORS.declarationsChip, { visible: true });
+    // Wait for the policy detail page to load
+    await tab
+      .waitForNavigation({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT })
+      .catch(() => {});
 
-    await club.evaluate((sel) => {
-      const chips = Array.from(document.querySelectorAll(sel));
-      const decl = chips.find((el) =>
-        el.textContent?.includes("Policy declarations")
-      ) as HTMLElement | undefined;
-      decl?.click();
-    }, SELECTORS.declarationsChip);
+    console.log(`[aaa] After 'View details' click, URL: ${tab.url()}`);
+    this.policyClubTab = tab;
+    return { policyId, tab };
+  }
 
-    const pdfPage = await AaaCarrier.waitForNewPage(
-      club.browser(),
-      pagesBeforePdf,
-      NAVIGATION_TIMEOUT
-    ).catch(() => club);
+  // ─── Step 6b: Click "View documents" ───────────────────────────────────────
+  private async stepClickViewDocuments(tab: Page): Promise<Page> {
+    await tab.bringToFront().catch(() => {});
 
-    await pdfPage.waitForNavigation({ waitUntil: "networkidle0" }).catch(() => {});
+    const viewDocs = await tab.waitForSelector(SEL_VIEW_DOCUMENTS, {
+      visible: true,
+      timeout: NAV_TIMEOUT,
+    });
 
-    const pdfBytes = await pdfPage.pdf({ format: "A4" });
-    const suffix = policyId ?? "unknown";
+    if (!viewDocs) {
+      throw new Error("AAA: Could not find 'View documents' link");
+    }
+
+    console.log("[aaa] Clicking 'View documents'…");
+    await Promise.all([
+      tab
+        .waitForNavigation({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT })
+        .catch(() => {}),
+      viewDocs.click(),
+    ]);
+
+    await sleep(2_000);
+    console.log(`[aaa] After 'View documents', URL: ${tab.url()}`);
+
+    await tab.waitForSelector(SEL_AUTO_DECLARATION, {
+      visible: true,
+      timeout: NAV_TIMEOUT,
+    });
+
+    this.policyClubTab = tab;
+    return tab;
+  }
+
+  // ─── Step 7: Click "Auto Declaration Page" and download PDF ──────────────
+  private async stepDownloadDeclaration(
+    workingPage: Page,
+    policyId: string | null,
+    _sessionId: string
+  ): Promise<DocumentResult["documents"]> {
+    const browser = workingPage.browser();
+
+    await workingPage.bringToFront().catch(() => {});
+    console.log(`[aaa] On documents page: ${workingPage.url()}`);
+
+    // Wait for the documents page to settle
+    console.log("[aaa] Waiting for documents page to settle…");
+    await workingPage.waitForNavigation({ waitUntil: "networkidle2", timeout: 8_000 }).catch(() => {});
+    await sleep(3_000);
+
+    // Wait for "Auto Declaration Page" link with robust retries
+    console.log("[aaa] Waiting for 'Auto Declaration Page' link with retries…");
+    let declLink: ElementHandle<Element> | null = null;
+    const deadline = Date.now() + NAV_TIMEOUT;
+    while (Date.now() < deadline) {
+      try {
+        declLink = await workingPage.waitForSelector(SEL_AUTO_DECLARATION, {
+          visible: true,
+          timeout: 3_000,
+        });
+        if (declLink) break;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("detached") || msg.includes("Session closed") || msg.includes("Target closed")) {
+          console.log("[aaa] Frame detached or page navigated while waiting. Retrying in 1s...");
+          await sleep(1_000);
+          try {
+            const pages = await AaaCarrier.safeBrowserPages(browser);
+            const docPage = pages.find((tab) => tab.url().includes("/documents"));
+            if (docPage) {
+              workingPage = docPage;
+              await workingPage.bringToFront().catch(() => {});
+            }
+          } catch { /* ignore */ }
+          continue;
+        }
+      }
+      await sleep(500);
+    }
+
+    if (!declLink) {
+      throw new Error(
+        `AAA: Could not find 'Auto Declaration Page' link (page: ${workingPage.url()})`
+      );
+    }
+
+    const href = await declLink.evaluate((el) => (el as HTMLAnchorElement).href);
+    console.log(`[aaa] 'Auto Declaration Page' href: ${href}`);
+
+    const suffix = policyId ?? "declarations";
+    let pdfBytes: Buffer;
+
+    // Blob URLs must be fetched in the documents-page context (before/at click)
+    if (href.startsWith("blob:")) {
+      console.log("[aaa] Fetching blob PDF from documents page…");
+      try {
+        const base64Data = await workingPage.evaluate(async (blobUrl) => {
+          const response = await fetch(blobUrl);
+          const blob = await response.blob();
+          return new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const result = reader.result as string;
+              resolve(result.split(",")[1] ?? "");
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }, href);
+        pdfBytes = Buffer.from(base64Data, "base64");
+        console.log(`[aaa] Fetched blob PDF (${pdfBytes.length} bytes)`);
+      } catch (err) {
+        console.warn(`[aaa] Blob fetch failed (${err}) — trying click + new tab…`);
+        pdfBytes = await this.downloadPdfViaClick(browser, workingPage, declLink, href, suffix);
+      }
+    } else {
+      pdfBytes = await this.downloadPdfViaClick(browser, workingPage, declLink, href, suffix);
+    }
 
     return [
       {
         type: "policy",
-        filename: `policy-declarations-${suffix}.pdf`,
+        filename: `auto-declaration-${suffix}.pdf`,
         mimeType: "application/pdf",
-        data: Buffer.from(pdfBytes),
+        data: pdfBytes,
       },
     ];
   }
 
-  // ─── Step runner ──────────────────────────────────────────────────────────────
+  /** Click Auto Declaration link (target=_blank) and fetch PDF bytes */
+  private async downloadPdfViaClick(
+    browser: Browser,
+    workingPage: Page,
+    declLink: ElementHandle<Element>,
+    href: string,
+    _suffix: string
+  ): Promise<Buffer> {
+    const pagesBefore = await AaaCarrier.safeBrowserPages(browser);
 
-  private async runStep(
-    step: number,
-    description: string,
-    fn: () => Promise<void>
-  ): Promise<void> {
-    await this.progress(`Step ${step}/${TOTAL_STEPS}: ${description}`);
-    try {
-      await fn();
-    } catch (err) {
-      throw AaaCarrier.wrapStepError(step, err);
-    }
-  }
+    console.log("[aaa] Clicking 'Auto Declaration Page'…");
+    await declLink.click();
+    await sleep(2_000);
 
-  private static async stepError(
-    step: number,
-    detail: string,
-    browser: Browser
-  ): Promise<Error> {
-    const urls = await AaaCarrier.tabUrls(browser);
-    return new Error(
-      `AAA step ${step}/${TOTAL_STEPS} failed: ${detail}. Tabs: ${urls.join(", ") || "none"}`
+    const pdfTab = await AaaCarrier.waitForNewPage(browser, pagesBefore, 10_000).catch(
+      () => null
     );
-  }
 
-  private static wrapStepError(step: number, err: unknown): Error {
-    if (err instanceof Error && err.message.startsWith("AAA step")) return err;
-    const msg = err instanceof Error ? err.message : String(err);
-    return new Error(`AAA step ${step}/${TOTAL_STEPS} failed: ${msg}`);
-  }
+    const workingTab = pdfTab ?? workingPage;
+    const finalUrl = pdfTab ? AaaCarrier.safeUrl(pdfTab) : href;
+    console.log(`[aaa] PDF target URL: ${finalUrl}`);
 
-  // ─── Okta helpers ─────────────────────────────────────────────────────────────
-
-  /**
-   * Okta serves a noscript fallback when JS is off. Wait for the Sign-In Widget
-   * (send-code or passcode step) — not the passcode field alone.
-   */
-  private static async ensureOktaWidgetReady(tab: Page): Promise<void> {
-    await tab.setJavaScriptEnabled(true);
-
-    const cdp = await tab.createCDPSession().catch(() => null);
-    await cdp
-      ?.send("Emulation.setScriptExecutionDisabled", { value: false })
+    await workingTab
+      .waitForNavigation({ waitUntil: "networkidle0", timeout: NAV_TIMEOUT })
       .catch(() => {});
 
-    const widgetVisible = async (): Promise<boolean> =>
-      tab
-        .evaluate(() => {
-          const noscript = document.querySelector("#noscript-msg");
-          const widget = document.querySelector("#okta-sign-in, #signin-container");
-          const send = document.querySelector('input[value="Send me the code"]');
-          const answer = document.querySelector('input[name="answer"]');
-          if (noscript && !widget && !send && !answer) return false;
-          return !!(widget || send || answer);
-        })
-        .catch(() => false);
-
-    if (!(await widgetVisible())) {
-      await tab
-        .reload({ waitUntil: "networkidle2", timeout: 60_000 })
-        .catch(() => tab.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }));
-    }
-
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      if (await widgetVisible()) return;
-      try {
-        await tab.waitForSelector(OKTA_WIDGET_SELECTOR, {
-          visible: true,
-          timeout: 3_000,
+    try {
+      console.log(`[aaa] Fetching PDF bytes at: ${finalUrl}`);
+      const base64Data = await workingPage.evaluate(async (url) => {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        return new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result as string;
+            resolve(result.split(",")[1] ?? "");
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
         });
-        return;
-      } catch {
-        await sleep(500);
-      }
-    }
+      }, finalUrl);
 
-    throw new Error(
-      `AAA: Okta sign-in widget did not load (tab: ${AaaCarrier.safeUrl(tab)})`
-    );
+      const pdfBytes = Buffer.from(base64Data, "base64");
+      console.log(`[aaa] Successfully fetched PDF (${pdfBytes.length} bytes)`);
+      return pdfBytes;
+    } catch (err) {
+      console.warn(`[aaa] Failed to fetch PDF directly: ${err}. Falling back to print-to-PDF…`);
+      const printBytes = await workingTab.pdf({ format: "Letter" });
+      return Buffer.from(printBytes);
+    }
   }
 
-  private static async findOktaTab(browser: Browser): Promise<Page | null> {
+  // ─── Okta helpers ──────────────────────────────────────────────────────────
+
+  private async findOktaTab(browser: Browser): Promise<Page | null> {
+    return AaaCarrier.findOktaTab(browser);
+  }
+
+  /** Pick the live mypolicy tab (not about:blank) */
+  private static async resolveActiveMypolicyTab(
+    browser: Browser,
+    fallback: Page
+  ): Promise<Page> {
     for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
-      if (OKTA_HOST_URL.test(AaaCarrier.safeUrl(tab))) return tab;
+      const url = AaaCarrier.safeUrl(tab);
+      if (url === "about:blank") continue;
+      if (
+        url.includes("mypolicy.csaa-insurance.aaa.com") ||
+        url.includes("mypolicyclub.digital.csaa-insurance.aaa.com") ||
+        url.includes(".okta.com")
+      ) {
+        return tab;
+      }
+    }
+    return fallback;
+  }
+
+  private static async hasPoliciesDashboard(browser: Browser): Promise<boolean> {
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      const url = AaaCarrier.safeUrl(tab);
+      if (!url.includes("/policies") || url.includes("policy-zip")) continue;
+      const found = await tab.$(SEL_VIEW_DETAILS).catch(() => null);
+      if (found) return true;
+    }
+    return false;
+  }
+
+  /** True when any tab has left the zip gate */
+  private static async hasLeftZipGate(browser: Browser): Promise<boolean> {
+    if (await AaaCarrier.hasPoliciesDashboard(browser)) {
+      console.log("[aaa] Policies dashboard visible");
+      return true;
+    }
+
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      try {
+        const url = AaaCarrier.safeUrl(tab);
+        if (url.includes("policy-zip") || url.includes("manage-mypolicy")) {
+          continue;
+        }
+        if (url.includes("mypolicy.csaa-insurance.aaa.com")) {
+          console.log(`[aaa] Left zip gate → ${url}`);
+          return true;
+        }
+      } catch {
+        /* detached tab */
+      }
+    }
+    return false;
+  }
+
+  private static async findPolicyZipTab(browser: Browser): Promise<Page | null> {
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      const url = AaaCarrier.safeUrl(tab);
+      if (url.includes("policy-zip") || url.includes("manage-mypolicy")) {
+        return tab;
+      }
     }
     return null;
   }
 
-  /** Child frames first — Okta often renders the form in an iframe, not the top document. */
-  private static liveContexts(tab: Page): OktaDomContext[] {
-    const mainFrame = tab.mainFrame();
-    const childFrames: Frame[] = [];
-
-    for (const frame of tab.frames()) {
-      try {
-        void frame.url();
-        if (frame !== mainFrame) childFrames.push(frame);
-      } catch {
-        /* detached */
+  /** Poll until View details appears on any tab */
+  private static async waitForPoliciesDashboard(
+    browser: Browser,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await AaaCarrier.hasLeftZipGate(browser)) {
+        await AaaCarrier.waitForViewDetails(browser, 10_000).catch(() => {});
+        return;
       }
+      await sleep(500);
     }
-
-    childFrames.sort(
-      (a, b) =>
-        AaaCarrier.framePriority(AaaCarrier.frameUrl(a)) -
-        AaaCarrier.framePriority(AaaCarrier.frameUrl(b))
-    );
-
-    return [...childFrames, tab];
+    throw new Error("AAA: Timed out waiting for policies dashboard after zip gate");
   }
 
-  private static frameUrl(ctx: OktaDomContext): string {
+  private static async waitForViewDetails(
+    browser: Browser,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+        const found = await tab
+          .waitForSelector(SEL_VIEW_DETAILS, { visible: true, timeout: 2_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (found) return;
+      }
+      await sleep(300);
+    }
+  }
+
+  private static async findOktaTab(browser: Browser): Promise<Page | null> {
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      if (await AaaCarrier.isOktaPageStatic(tab)) return tab;
+    }
+    return null;
+  }
+
+  /** Poll until an Okta tab appears (redirect after /policies is often delayed) */
+  private static async waitForOktaTab(
+    browser: Browser,
+    timeoutMs: number
+  ): Promise<Page | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const tab = await AaaCarrier.findOktaTab(browser);
+      if (tab) return tab;
+      await sleep(500);
+    }
+    return null;
+  }
+
+  /** After goto /policies, wait for either Okta redirect or policies page */
+  private static async waitForOktaOrPolicyClub(
+    browser: Browser,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await AaaCarrier.findOktaTab(browser)) {
+        console.log("[aaa] Navigation settled on Okta");
+        return;
+      }
+      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+        const url = AaaCarrier.safeUrl(tab);
+        if (
+          url.includes("/policies") ||
+          url.includes("policy-zip") ||
+          url.includes("manage-mypolicy")
+        ) {
+          console.log(`[aaa] Navigation settled on Policy Club: ${url}`);
+          return;
+        }
+      }
+      await sleep(500);
+    }
+    console.log("[aaa] Navigation settle timeout — continuing");
+  }
+
+  private async isOktaPage(tab: Page): Promise<boolean> {
+    return AaaCarrier.isOktaPageStatic(tab);
+  }
+
+  private static async isOktaPageStatic(tab: Page): Promise<boolean> {
+    if (tab.isClosed()) return false;
+    const url = tab.url();
+    if (/\.okta\.com/i.test(url)) return true;
+
+    // Check for Okta widget in the page content (may be embedded in iframe)
     try {
-      return AaaCarrier.isPage(ctx) ? ctx.url() : ctx.url();
-    } catch {
-      return "";
+      const hasWidget = await tab.evaluate(() => {
+        return !!(
+          document.querySelector('#okta-sign-in') ||
+          document.querySelector('input[value="Send me the code"]') ||
+          document.querySelector('input[name="answer"]') ||
+          document.querySelector('input[name="credentials.passcode"]')
+        );
+      });
+      if (hasWidget) return true;
+
+      // Also check iframes
+      for (const frame of tab.frames()) {
+        try {
+          const frameHasWidget = await frame.evaluate(() => {
+            return !!(
+              document.querySelector('#okta-sign-in') ||
+              document.querySelector('input[value="Send me the code"]') ||
+              document.querySelector('input[name="answer"]')
+            );
+          });
+          if (frameHasWidget) return true;
+        } catch { /* detached */ }
+      }
+    } catch { /* closed */ }
+
+    return false;
+  }
+
+  private async waitForOktaWidget(tab: Page): Promise<void> {
+    console.log("[aaa] Waiting for Okta widget…");
+
+    // Ensure JS enabled
+    await tab.setJavaScriptEnabled(true).catch(() => {});
+    const cdp = await tab.createCDPSession().catch(() => null);
+    await cdp?.send("Emulation.setScriptExecutionDisabled", { value: false }).catch(() => {});
+
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const found = await tab.evaluate(() => {
+        return !!(
+          document.querySelector('#okta-sign-in') ||
+          document.querySelector('input[value="Send me the code"]') ||
+          document.querySelector('input[name="answer"]')
+        );
+      }).catch(() => false);
+
+      if (found) {
+        console.log("[aaa] Okta widget found");
+        return;
+      }
+
+      // Try frames
+      for (const frame of tab.frames()) {
+        try {
+          const found = await frame.evaluate(() => {
+            return !!(
+              document.querySelector('#okta-sign-in') ||
+              document.querySelector('input[value="Send me the code"]') ||
+              document.querySelector('input[name="answer"]')
+            );
+          });
+          if (found) {
+            console.log("[aaa] Okta widget found in iframe");
+            return;
+          }
+        } catch { /* detached */ }
+      }
+      await sleep(500);
     }
+
+    // Reload and try again
+    console.log("[aaa] Reloading Okta page to ensure JS is active…");
+    await tab.reload({ waitUntil: "networkidle2", timeout: 30_000 }).catch(() => {});
+    await tab
+      .waitForSelector(
+        '#okta-sign-in, input[value="Send me the code"], input[name="answer"]',
+        { timeout: 15_000 }
+      )
+      .catch(() => {});
   }
 
-  private static framePriority(url: string): number {
-    if (/verify\/okta\/email/i.test(url)) return 0;
-    if (/\/verify\//i.test(url)) return 1;
-    if (/okta\.com/i.test(url)) return 2;
-    return 3;
-  }
-
-  private static isPage(ctx: OktaDomContext): ctx is Page {
-    return typeof (ctx as Page).bringToFront === "function";
-  }
-
-  private static pageFromContext(ctx: OktaDomContext, fallback: Page): Page {
-    return AaaCarrier.isPage(ctx) ? ctx : (ctx.page() ?? fallback);
-  }
-
-  private static async anyContextHasPasscode(tab: Page): Promise<boolean> {
-    for (const ctx of AaaCarrier.liveContexts(tab)) {
-      const el = await ctx.$(OKTA_PASSCODE_SELECTOR).catch(() => null);
+  private async hasCodeInput(tab: Page): Promise<boolean> {
+    for (const ctx of this.allContexts(tab)) {
+      const el = await ctx.$(SEL_OKTA_CODE_INPUT).catch(() => null);
       if (el) return true;
     }
     return false;
   }
 
-  private static async findPasscodeContext(
-    tab: Page,
-    timeoutMs: number
-  ): Promise<OktaDomContext | null> {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      for (const ctx of AaaCarrier.liveContexts(tab)) {
-        const el = await ctx.$(OKTA_PASSCODE_SELECTOR).catch(() => null);
-        if (el) return ctx;
-      }
-      await sleep(200);
-    }
-
-    return null;
-  }
-
-  private static async locateOktaOnTab(
-    tab: Page,
-    need: OktaNeed
-  ): Promise<OktaLoc | null> {
-    if (tab.isClosed()) return null;
-
-    for (const ctx of AaaCarrier.liveContexts(tab)) {
-      try {
-        if (need === "send-code") {
-          const send = await AaaCarrier.findFirst(ctx, OKTA_SEND_CODE_SELECTORS);
-          if (send) return { page: tab, context: ctx, send };
-        }
-
-        const input = await AaaCarrier.findOktaPasscodeInput(ctx);
-        const verify = await AaaCarrier.findFirst(ctx, OKTA_VERIFY_SELECTORS);
-        if (input) return { page: tab, context: ctx, input, verify };
-      } catch {
-        /* frame navigated */
-      }
-    }
-
-    return null;
-  }
-
-  private static async hasOktaPasscodeInput(tab: Page): Promise<boolean> {
-    for (const ctx of AaaCarrier.liveContexts(tab)) {
-      const input = await AaaCarrier.findOktaPasscodeInput(ctx);
-      if (input) return true;
-    }
-    return false;
-  }
-
-  private static async findOktaPasscodeInput(
-    ctx: OktaDomContext
-  ): Promise<ElementHandle<Element> | undefined> {
-    for (const sel of OKTA_INPUT_SELECTORS) {
-      const el = await ctx.$(sel);
-      if (el && (await AaaCarrier.isOktaPasscodeField(el))) return el;
-    }
-
-    const handle = await ctx.evaluateHandle(() => {
-      for (const el of document.querySelectorAll("input")) {
-        const input = el as HTMLInputElement;
-        if (input.disabled || input.type === "hidden" || input.type === "submit") {
-          continue;
-        }
-        const hint = `${input.name} ${input.autocomplete} ${input.id}`;
-        if (/answer|passcode|one-time-code/i.test(hint)) return input;
-        if (input.type === "tel" && input.name === "answer") return input;
-      }
-      return null;
-    });
-
-    const element = handle.asElement() as ElementHandle<Element> | null;
-    if (element && (await AaaCarrier.isOktaPasscodeField(element))) {
-      return element;
-    }
-
-    return undefined;
-  }
-
-  private static async isOktaPasscodeField(
-    handle: ElementHandle<Element>
-  ): Promise<boolean> {
-    return handle.evaluate((node) => {
-      const input = node as HTMLInputElement;
-      if (input.disabled || input.type === "hidden" || input.type === "submit") {
-        return false;
-      }
-      const hint = `${input.name} ${input.autocomplete}`;
-      if (/answer|passcode|one-time-code/i.test(hint)) return true;
-      return input.type === "tel" && input.name === "answer";
-    });
-  }
-
-  private static async clickOktaSendCode(tab: Page): Promise<boolean> {
-    const loc = await AaaCarrier.locateOktaOnTab(tab, "send-code");
-    if (loc?.send) {
-      await loc.send.click();
-      await sleep(2_000);
-      return true;
-    }
-
-    const clickScript = () => {
-      for (const el of document.querySelectorAll(
-        "input[type='submit'], button[type='submit'], button, input.button-primary"
-      )) {
-        const label =
-          (el as HTMLInputElement).value ||
-          (el as HTMLButtonElement).textContent ||
-          "";
-        if (/send me the code/i.test(label.trim())) {
-          (el as HTMLElement).click();
-          return true;
-        }
-      }
-      return false;
-    };
-
-    for (const ctx of AaaCarrier.liveContexts(tab)) {
-      const clicked = await ctx.evaluate(clickScript).catch(() => false);
-      if (clicked) {
+  private async clickSendCode(tab: Page): Promise<void> {
+    for (const ctx of this.allContexts(tab)) {
+      const btn = await ctx.$(SEL_OKTA_SEND_CODE).catch(() => null);
+      if (btn) {
+        await btn.click();
         await sleep(2_000);
-        return true;
+        return;
       }
     }
-
-    return false;
+    throw new Error("AAA: Could not find 'Send me the code' button on Okta");
   }
 
-  /** After Send code — passcode field appears on same Okta URL. */
-  private static async waitForOktaCodeInput(
-    tab: Page,
-    timeoutMs: number
-  ): Promise<ElementHandle<Element>> {
-    await tab.bringToFront().catch(() => {});
-
-    try {
-      await tab.waitForFunction(
-        () => {
-          for (const el of document.querySelectorAll("input")) {
-            const input = el as HTMLInputElement;
-            if (input.disabled || input.type === "hidden" || input.type === "submit") {
-              continue;
-            }
-            const hint = `${input.name} ${input.autocomplete}`;
-            if (/answer|passcode|one-time-code/i.test(hint)) return true;
-            if (input.type === "tel" && input.name === "answer") return true;
-          }
-          return false;
-        },
-        { timeout: Math.min(timeoutMs, 15_000) }
-      );
-    } catch {
-      /* main frame only — fall through to frame scan */
-    }
-
+  private async waitForCodeInput(tab: Page, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       for (const ctx of AaaCarrier.liveContexts(tab)) {
-        const input = await AaaCarrier.findOktaPasscodeInput(ctx);
-        if (input) return input;
+        const el = await ctx.$(SEL_OKTA_CODE_INPUT).catch(() => null);
+        if (el) return;
       }
       await sleep(300);
     }
-
-    throw new Error(
-      `AAA: Timed out waiting for Okta code input (tab: ${AaaCarrier.safeUrl(tab)})`
-    );
+    throw new Error("AAA: Timed out waiting for Okta code input field");
   }
 
   /**
@@ -716,194 +1146,129 @@ export class AaaCarrier extends BaseCarrier {
   ): Promise<void> {
     const safeCode = String(code).replace(/\s/g, "");
     const deadline = Date.now() + OKTA_SUBMIT_TIMEOUT;
+    let attempt = 0;
 
     while (Date.now() < deadline) {
+      attempt += 1;
       const tab =
         (await AaaCarrier.findOktaTab(browser)) ??
         (tabHint.isClosed() ? null : tabHint);
 
       if (!tab) {
+        console.log(`[aaa] Okta submit attempt ${attempt}: no Okta tab yet`);
         await sleep(400);
         continue;
       }
 
       await tab.bringToFront().catch(() => {});
-      await AaaCarrier.ensureOktaWidgetReady(tab);
-
-      if (!(await AaaCarrier.anyContextHasPasscode(tab))) {
-        await AaaCarrier.clickOktaSendCode(tab);
-        await sleep(2_000);
-      }
+      await tab.setJavaScriptEnabled(true).catch(() => {});
 
       try {
+        // Ensure the passcode field is present before filling (fresh each attempt)
+        await AaaCarrier.waitForOktaInputVisible(tab, 5_000);
+
         if (await AaaCarrier.fillAndVerifyOktaInTab(tab, safeCode)) {
+          console.log(`[aaa] Okta code submitted on attempt ${attempt}`);
           await tab
             .waitForNavigation({
               waitUntil: "domcontentloaded",
-              timeout: NAVIGATION_TIMEOUT,
+              timeout: NAV_TIMEOUT,
             })
             .catch(() => {});
+          await sleep(2_000);
+          console.log(`[aaa] After verify, URL: ${AaaCarrier.safeUrl(tab)}`);
           return;
         }
+
+        console.log(
+          `[aaa] Okta submit attempt ${attempt} failed — ${await AaaCarrier.oktaPageDebugHint(tab)}`
+        );
       } catch (err) {
         if (!AaaCarrier.isDetachedError(err)) throw err;
+        console.log(`[aaa] Okta submit attempt ${attempt}: detached frame, retrying…`);
       }
 
       await sleep(400);
     }
 
-    const hint = await AaaCarrier.oktaPageDebugHint(tabHint);
+    const lastTab =
+      (await AaaCarrier.findOktaTab(browser)) ??
+      (tabHint.isClosed() ? null : tabHint);
+    const hint = lastTab
+      ? await AaaCarrier.oktaPageDebugHint(lastTab)
+      : "Okta tab closed";
+
     throw new Error(
       `AAA: Could not submit Okta code (tab: ${AaaCarrier.safeUrl(tabHint)}). ${hint}`
     );
+  }
+
+  private static async waitForOktaInputVisible(
+    tab: Page,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const ctx of AaaCarrier.oktaSubmitContexts(tab)) {
+        const el = await ctx
+          .$(`${SEL_OKTA_ANSWER}, ${SEL_OKTA_CODE_INPUT}`)
+          .catch(() => null);
+        if (el) return;
+      }
+      await sleep(200);
+    }
+  }
+
+  /** Main page first — AAA uses full-page Okta at csaainsurance.okta.com */
+  private static oktaSubmitContexts(tab: Page): OktaCtx[] {
+    const childFrames: Frame[] = [];
+    for (const frame of tab.frames()) {
+      try {
+        void frame.url();
+        if (frame !== tab.mainFrame()) childFrames.push(frame);
+      } catch {
+        /* detached */
+      }
+    }
+    return [tab, ...childFrames];
   }
 
   private static async fillAndVerifyOktaInTab(
     tab: Page,
     otp: string
   ): Promise<boolean> {
-    const ctx = await AaaCarrier.findPasscodeContext(tab, 15_000);
-
-    if (!ctx) {
-      for (const fallback of AaaCarrier.liveContexts(tab)) {
-        try {
-          if (await AaaCarrier.fillOktaViaPuppeteer(fallback, otp, tab)) {
-            return true;
-          }
-          if (await AaaCarrier.fillOktaViaEvaluate(fallback, otp)) return true;
-        } catch (err) {
-          if (!AaaCarrier.isDetachedError(err)) throw err;
-        }
+    // 1. Explicit AAA selectors on main page (input[name="answer"] + Verify)
+    for (const ctx of AaaCarrier.oktaSubmitContexts(tab)) {
+      try {
+        if (await AaaCarrier.fillOktaViaExplicitEvaluate(ctx, otp)) return true;
+      } catch (err) {
+        if (!AaaCarrier.isDetachedError(err)) throw err;
       }
-      return false;
     }
 
-    try {
-      if (await AaaCarrier.fillOktaViaPuppeteer(ctx, otp, tab)) return true;
-      if (await AaaCarrier.fillOktaViaEvaluate(ctx, otp)) return true;
-    } catch (err) {
-      if (!AaaCarrier.isDetachedError(err)) throw err;
+    // 2. Puppeteer typing (fresh handles, same attempt)
+    for (const ctx of AaaCarrier.oktaSubmitContexts(tab)) {
+      try {
+        if (await AaaCarrier.fillOktaViaPuppeteer(ctx, otp)) return true;
+      } catch (err) {
+        if (!AaaCarrier.isDetachedError(err)) throw err;
+      }
     }
 
     return false;
   }
 
-  /** Type into the passcode field like a user (works when evaluate cannot see the node). */
-  private static async fillOktaViaPuppeteer(
-    ctx: OktaDomContext,
-    otp: string,
-    tab: Page
-  ): Promise<boolean> {
-    const input =
-      (await ctx.$(OKTA_PASSCODE_SELECTOR).catch(() => null)) ??
-      (await ctx
-        .waitForSelector(OKTA_PASSCODE_SELECTOR, { timeout: 5_000, visible: true })
-        .catch(() =>
-          ctx.waitForSelector(OKTA_PASSCODE_SELECTOR, {
-            timeout: 3_000,
-            visible: false,
-          })
-        )
-        .catch(() => null));
-
-    if (!input) return false;
-
-    const page = AaaCarrier.pageFromContext(ctx, tab);
-    const keyboard = page.keyboard;
-
-    await input.click();
-    await input.click().catch(() => {});
-    await input.click().catch(() => {});
-    await input.evaluate((el) => {
-      (el as HTMLInputElement).value = "";
-    });
-
-    try {
-      await input.type(otp, { delay: 50 });
-    } catch {
-      await keyboard.type(otp, { delay: 50 });
-    }
-
-    const verify =
-      (await ctx.$(OKTA_VERIFY_BUTTON_SELECTOR).catch(() => null)) ??
-      (await AaaCarrier.findFirst(ctx, OKTA_VERIFY_SELECTORS).catch(() => null));
-
-    if (verify) {
-      await verify.click();
-      return true;
-    }
-
-    const clicked = await ctx
-      .evaluate(() => {
-        for (const el of document.querySelectorAll(
-          "input[type='submit'], button[type='submit'], button"
-        )) {
-          const label =
-            (el as HTMLInputElement).value ||
-            (el as HTMLButtonElement).innerText ||
-            "";
-          if (/^verify$/i.test(label.trim())) {
-            (el as HTMLElement).click();
-            return true;
-          }
-        }
-        return false;
-      })
-      .catch(() => false);
-
-    if (clicked) return true;
-
-    await input.press("Enter");
-    return true;
-  }
-
-  private static async fillOktaViaEvaluate(
-    ctx: OktaDomContext,
+  /** AAA Okta email verify — form #form32, input[name="answer"], Verify button */
+  private static async fillOktaViaExplicitEvaluate(
+    ctx: OktaCtx,
     otp: string
   ): Promise<boolean> {
     return ctx.evaluate((code) => {
-      const collectInputs = (root: Document | ShadowRoot): HTMLInputElement[] => {
-        const list: HTMLInputElement[] = [];
-        for (const el of root.querySelectorAll("input")) {
-          list.push(el as HTMLInputElement);
-        }
-        for (const host of root.querySelectorAll("*")) {
-          const shadow = (host as HTMLElement).shadowRoot;
-          if (shadow) list.push(...collectInputs(shadow));
-        }
-        return list;
-      };
+      const input =
+        (document.querySelector('input[name="answer"]') as HTMLInputElement | null) ??
+        (document.querySelector('input[name="credentials.passcode"]') as HTMLInputElement | null);
 
-      const pickInput = (): HTMLInputElement | null => {
-        for (const input of collectInputs(document)) {
-          if (input.disabled || input.type === "hidden" || input.type === "submit") {
-            continue;
-          }
-          const hint = `${input.name} ${input.autocomplete} ${input.id}`;
-          if (/answer|passcode|one-time-code/i.test(hint)) return input;
-          if (input.type === "tel" && input.name === "answer") return input;
-        }
-        return null;
-      };
-
-      const clickVerify = (): boolean => {
-        for (const el of document.querySelectorAll(
-          "input[type='submit'], button[type='submit'], button, input.button-primary"
-        )) {
-          const label =
-            (el as HTMLInputElement).value ||
-            (el as HTMLButtonElement).innerText ||
-            "";
-          if (/^verify$/i.test(label.trim())) {
-            (el as HTMLElement).click();
-            return true;
-          }
-        }
-        return false;
-      };
-
-      const input = pickInput();
-      if (!input) return false;
+      if (!input || input.disabled || input.type === "hidden") return false;
 
       input.focus();
       const setter = Object.getOwnPropertyDescriptor(
@@ -916,261 +1281,235 @@ export class AaaCarrier extends BaseCarrier {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
 
-      if (clickVerify()) return true;
-      input.closest("form")?.requestSubmit();
+      const verify =
+        (document.querySelector('input[value="Verify"]') as HTMLInputElement | null) ??
+        (document.querySelector('input[data-type="save"][value="Verify"]') as HTMLInputElement | null);
+
+      if (verify) {
+        verify.click();
+        return true;
+      }
+
+      const form =
+        (document.querySelector("#form32") as HTMLFormElement | null) ??
+        input.closest("form");
+      form?.requestSubmit();
       return true;
     }, otp);
   }
 
   private static async oktaPageDebugHint(tab: Page): Promise<string> {
-    const parts: string[] = [`pageUrl=${AaaCarrier.safeUrl(tab)}`];
-
-    for (const ctx of AaaCarrier.liveContexts(tab)) {
-      const label = AaaCarrier.frameUrl(ctx) || "unknown-frame";
-      try {
-        const snippet = await ctx.evaluate(() => {
-          const inputs = Array.from(document.querySelectorAll("input"))
-            .slice(0, 12)
-            .map((el) => {
-              const input = el as HTMLInputElement;
-              return `${input.type}:${input.name}:${input.id}`;
-            });
-          const buttons = Array.from(
-            document.querySelectorAll("input[type='submit'], button")
-          )
-            .slice(0, 8)
-            .map((el) => {
-              return (
-                (el as HTMLInputElement).value ||
-                (el as HTMLButtonElement).innerText ||
-                ""
-              ).trim();
-            });
-          return `inputs=[${inputs.join("; ")}] buttons=[${buttons.join("; ")}]`;
+    try {
+      return await tab.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll("input")).map((el) => {
+          const input = el as HTMLInputElement;
+          return `${input.type}:${input.name}:${input.id}:${input.disabled}`;
         });
-        parts.push(`{${label}: ${snippet}}`);
-      } catch {
-        parts.push(`{${label}: no-access}`);
-      }
+        const buttons = Array.from(
+          document.querySelectorAll("input[type='submit'], button")
+        ).map((el) =>
+          (
+            (el as HTMLInputElement).value ||
+            (el as HTMLButtonElement).innerText ||
+            ""
+          ).trim()
+        );
+        return `inputs=[${inputs.join("; ")}] buttons=[${buttons.join("; ")}]`;
+      });
+    } catch {
+      return "Could not read Okta DOM";
+    }
+  }
+
+  /** Type into passcode field like a user when evaluate cannot see the node. */
+  private static async fillOktaViaPuppeteer(
+    ctx: OktaCtx,
+    otp: string
+  ): Promise<boolean> {
+    const input = await ctx
+      .waitForSelector(`${SEL_OKTA_ANSWER}, ${SEL_OKTA_CODE_INPUT}`, {
+        visible: true,
+        timeout: 8_000,
+      })
+      .catch(() => null);
+
+    if (!input) return false;
+
+    await input.click({ count: 3 });
+    await input.evaluate((el) => {
+      (el as HTMLInputElement).value = "";
+    });
+    await input.type(otp, { delay: 50 });
+
+    const typed = await input
+      .evaluate((el) => (el as HTMLInputElement).value)
+      .catch(() => "");
+    if (!typed) return false;
+
+    console.log(`[aaa] Okta code typed via Puppeteer (${typed.length} chars)`);
+
+    const verify = await ctx.$(SEL_OKTA_VERIFY).catch(() => null);
+    if (verify) {
+      await verify.click();
+      return true;
     }
 
-    return parts.join(" | ");
+    await input.press("Enter");
+    return true;
   }
 
   private static isDetachedError(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
-    return /detached Frame|Execution context was destroyed|Cannot find context/i.test(
+    return /detached Frame|Execution context was destroyed|Cannot find context|Navigating frame was detached/i.test(
       msg
     );
-  }
-
-  // ─── Dashboard / tabs ─────────────────────────────────────────────────────────
-
-  private static async findDashboardTab(browser: Browser): Promise<Page | null> {
-    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
-      if (await AaaCarrier.hasPolicyDashboard(tab)) return tab;
-    }
-    return null;
-  }
-
-  private static async hasPolicyDashboard(tab: Page): Promise<boolean> {
-    if (tab.isClosed()) return false;
-    try {
-      return await tab.evaluate(
-        (dashSel, detailsSel) => {
-          if (document.querySelector(detailsSel)) return true;
-          const dash = document.querySelector(dashSel);
-          if (dash?.textContent?.includes("View policies")) return true;
-          const text = document.body?.innerText ?? "";
-          return /view details|view policies|your policies/i.test(text);
-        },
-        SELECTORS.dashboardText,
-        SELECTORS.policyDetailsBtn
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  /** Popup tab opened by Manage Policy (target=_blank). */
-  private static async waitForNewPolicyClubTab(
-    browser: Browser,
-    pagesBefore: Page[],
-    timeoutMs: number
-  ): Promise<Page | null> {
-    const known = new Set(pagesBefore);
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
-        if (known.has(tab)) continue;
-        if (await AaaCarrier.tabReachedAuthDestination(tab)) return tab;
-      }
-      await sleep(250);
-    }
-
-    return null;
-  }
-
-  /** Tab finished SSO handoff — Okta, Policy Club host, or dashboard. */
-  private static async tabReachedAuthDestination(tab: Page): Promise<boolean> {
-    if (tab.isClosed()) return false;
-    const url = AaaCarrier.safeUrl(tab);
-    if (!url || url === "about:blank") return false;
-    if (OKTA_HOST_URL.test(url)) return true;
-    if (POLICY_CLUB_URL.test(url)) return true;
-    if (await AaaCarrier.hasPolicyDashboard(tab)) return true;
-    return false;
-  }
-
-  private static async waitForTabReachAuth(
-    tab: Page,
-    timeoutMs: number
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    let lastUrl = "";
-
-    while (Date.now() < deadline) {
-      if (await AaaCarrier.tabReachedAuthDestination(tab)) return;
-      const url = AaaCarrier.safeUrl(tab);
-      if (url && url !== lastUrl) lastUrl = url;
-      await sleep(300);
-    }
-
-    throw new Error(
-      `AAA step 3/6: Policy Club tab did not load (last URL: ${lastUrl || "unknown"})`
-    );
-  }
-
-  private static async navigatePolicyClubTab(
-    tab: Page,
-    href: string
-  ): Promise<void> {
-    try {
-      await tab.goto(href, {
-        waitUntil: "domcontentloaded",
-        timeout: NAVIGATION_TIMEOUT,
-      });
-    } catch (err) {
-      if (await AaaCarrier.tabReachedAuthDestination(tab)) return;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/LifecycleWatcher disposed|net::ERR_ABORTED|Navigating frame was detached/i.test(msg)) {
-        throw err;
-      }
-    }
-
-    await AaaCarrier.waitForTabReachAuth(tab, NAVIGATION_TIMEOUT);
-  }
-
-  /** On insurance page or Manage Policy is visible (ready for step 3). */
-  private static async isMwgInsuranceReady(mwg: Page): Promise<boolean> {
-    if (/\/my-account\/insurance/i.test(AaaCarrier.safeUrl(mwg))) return true;
-
-    const manage = await mwg.$(SELECTORS.managePolicyLink);
-    if (!manage) return false;
-
-    return manage
-      .evaluate((el) => {
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
-      })
-      .catch(() => false);
-  }
-
-  private static async waitForMwgInsuranceReady(
-    mwg: Page,
-    timeoutMs: number
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      if (await AaaCarrier.isMwgInsuranceReady(mwg)) return;
-      await sleep(300);
-    }
-
-    throw new Error(
-      `AAA step 2/6: Insurance page not ready (url: ${AaaCarrier.safeUrl(mwg)})`
-    );
-  }
-
-  private static async resolveManagePolicyHref(mwg: Page): Promise<string> {
-    for (const sel of [
-      SELECTORS.managePolicyLink,
-      'a[href*="mypolicyclub.digital.csaa-insurance.aaa.com/policies"]',
-    ]) {
-      const handle = await mwg.$(sel);
-      if (!handle) continue;
-      const href = await handle.evaluate((el) => (el as HTMLAnchorElement).href?.trim());
-      if (href && /\/policies/i.test(href)) return href;
-    }
-    return POLICY_CLUB_POLICIES_URL;
-  }
-
-  private static async waitForCondition<T>(
-    fn: () => Promise<T | null>,
-    timeoutMs: number,
-    label: string
-  ): Promise<T> {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      const result = await fn();
-      if (result) return result;
-      await sleep(300);
-    }
-
-    throw new Error(`AAA: Timed out waiting for ${label}`);
-  }
-
-  // ─── Browser utilities ────────────────────────────────────────────────────────
-
-  private static async safeBrowserPages(browser: Browser): Promise<Page[]> {
-    try {
-      const pages = await browser.pages();
-      return pages.filter((tab) => {
-        try {
-          return !tab.isClosed();
-        } catch {
-          return false;
-        }
-      });
-    } catch {
-      return [];
-    }
   }
 
   private static safeUrl(tab: Page): string {
     try {
       return tab.url();
     } catch {
-      return "";
+      return "(closed)";
     }
   }
 
-  private static async tabUrls(browser: Browser): Promise<string[]> {
-    const seen = new Set<string>();
+  /** Wait until any tab leaves Okta and lands on policy club */
+  private static async waitForPostOktaRedirect(
+    browser: Browser,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+        const url = AaaCarrier.safeUrl(tab);
+        if (/\.okta\.com/i.test(url)) continue;
+        if (
+          url.includes("mypolicy.csaa-insurance.aaa.com") ||
+          url.includes("mypolicyclub.digital.csaa-insurance.aaa.com") ||
+          url.includes("policy-zip") ||
+          url.includes("manage-mypolicy")
+        ) {
+          console.log(`[aaa] Post-Okta redirect detected: ${url}`);
+          return;
+        }
+      }
+      await sleep(500);
+    }
+    console.log("[aaa] Post-Okta redirect not detected within timeout — continuing");
+  }
+
+  /** Pick a live tab for navigation — never return a detached page */
+  private static async resolveLivePolicyTab(
+    browser: Browser,
+    fallback: Page
+  ): Promise<Page> {
     for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
-      const url = AaaCarrier.safeUrl(tab);
-      if (url) seen.add(url);
+      try {
+        const url = AaaCarrier.safeUrl(tab);
+        if (/\.okta\.com/i.test(url)) continue;
+        if (
+          url.includes("mypolicy") ||
+          url.includes("csaa-insurance.aaa.com") ||
+          url.includes("mwg.aaa.com")
+        ) {
+          void tab.url(); // throws if detached
+          return tab;
+        }
+      } catch {
+        /* detached — try next tab */
+      }
     }
-    return [...seen];
+
+    for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
+      try {
+        void tab.url();
+        if (!tab.isClosed()) return tab;
+      } catch {
+        /* detached */
+      }
+    }
+
+    return await browser.newPage();
   }
 
-  private static async findFirst(
-    ctx: OktaDomContext,
-    selectors: readonly string[]
-  ): Promise<ElementHandle<Element> | undefined> {
-    for (const sel of selectors) {
-      const el = await ctx.$(sel);
-      if (el) return el;
+  private static async safeGoto(tab: Page, url: string): Promise<Page> {
+    let target = tab;
+    try {
+      void tab.url();
+    } catch {
+      target = await AaaCarrier.resolveLivePolicyTab(tab.browser(), tab);
     }
-    return undefined;
+
+    try {
+      await target.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      return target;
+    } catch (err) {
+      if (!AaaCarrier.isDetachedError(err)) throw err;
+      const fresh = await AaaCarrier.resolveLivePolicyTab(tab.browser(), tab);
+      await fresh.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      return fresh;
+    }
+  }
+
+  /** Child frames first — Okta often renders the form in an iframe, not the top document. */
+  private static liveContexts(tab: Page): OktaCtx[] {
+    const mainFrame = tab.mainFrame();
+    const childFrames: Frame[] = [];
+
+    for (const frame of tab.frames()) {
+      try {
+        void frame.url();
+        if (frame !== mainFrame) childFrames.push(frame);
+      } catch {
+        /* detached */
+      }
+    }
+
+    return [...childFrames, tab];
+  }
+
+  /** Returns all live contexts: child frames first, then the main page */
+  private allContexts(tab: Page): OktaCtx[] {
+    return AaaCarrier.liveContexts(tab);
+  }
+
+  // ─── Policy tab helpers ────────────────────────────────────────────────────
+
+  /** Find the tab that is on the policy club domain (prefer /policies or /policy/) */
+  private async getPoliciesTab(browser: Browser, fallback: Page): Promise<Page> {
+    if (this.policyClubTab && !this.policyClubTab.isClosed()) {
+      return this.policyClubTab;
+    }
+
+    const tabs = await AaaCarrier.safeBrowserPages(browser);
+    const policyClub = tabs.filter((tab) => {
+      const url = tab.url();
+      return (
+        url.includes("mypolicy.csaa-insurance.aaa.com") ||
+        url.includes("mypolicyclub.digital.csaa-insurance.aaa.com")
+      );
+    });
+
+    for (const tab of policyClub) {
+      const url = tab.url();
+      if (url.includes("/policy/") || url.includes("/policies")) return tab;
+    }
+
+    if (policyClub.length > 0) return policyClub[0];
+    return fallback;
+  }
+
+  // ─── Static utilities ───────────────────────────────────────────────────────
+
+  private static async safeBrowserPages(browser: Browser): Promise<Page[]> {
+    try {
+      const pages = await browser.pages();
+      return pages.filter((tab) => {
+        try { return !tab.isClosed(); } catch { return false; }
+      });
+    } catch {
+      return [];
+    }
   }
 
   private static async waitForNewPage(
@@ -1180,24 +1519,27 @@ export class AaaCarrier extends BaseCarrier {
   ): Promise<Page> {
     const known = new Set(pagesBefore);
     const deadline = Date.now() + timeoutMs;
-
     while (Date.now() < deadline) {
       for (const tab of await AaaCarrier.safeBrowserPages(browser)) {
         if (!known.has(tab)) return tab;
       }
       await sleep(250);
     }
-
-    throw new Error("AAA: Timed out waiting for a new browser tab");
+    throw new Error("AAA: Timed out waiting for new browser tab");
   }
 
-  private static extractCredentials(
+  private static creds(
     credentials: Record<string, string>
   ): { email: string; password: string } {
     const { email, password } = credentials;
     if (!email) throw new Error("AaaCarrier: missing credential 'email'");
     if (!password) throw new Error("AaaCarrier: missing credential 'password'");
     return { email, password };
+  }
+
+  // ─── Required stubs for fetchDocuments (used by finalizeDocuments) ──────────
+  protected async fetchDocuments(_page: Page): Promise<DocumentResult["documents"]> {
+    return [];
   }
 }
 

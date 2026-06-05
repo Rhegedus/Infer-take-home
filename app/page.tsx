@@ -24,12 +24,13 @@ interface CarrierSession {
 }
 
 interface Carrier {
-  id:          CarrierId;
-  label:       string;
+  id:           CarrierId;
+  label:        string;
   needsPassword: boolean;
-  mfaLabel:    string;
-  mfaHint:     string;
-  color:       string;
+  needsZipCode: boolean;
+  mfaLabel:     string;
+  mfaHint:      string;
+  color:        string;
 }
 
 // ─── Carrier Registry ─────────────────────────────────────────────────────────
@@ -39,14 +40,16 @@ const CARRIERS: Carrier[] = [
     id:            "aaa",
     label:         "AAA",
     needsPassword: true,
-    mfaLabel:      "SMS Code",
-    mfaHint:       "Enter the 6-digit code texted to your phone",
+    needsZipCode:  true,
+    mfaLabel:      "Email OTP",
+    mfaHint:       "Enter the 6-digit code sent to your email",
     color:         "#003DA5",
   },
   {
     id:            "lemonade",
     label:         "Lemonade",
     needsPassword: false,
+    needsZipCode:  false,
     mfaLabel:      "Email OTP",
     mfaHint:       "Enter the 6-digit code sent to your email",
     color:         "#FF0083",
@@ -77,6 +80,7 @@ export default function Page() {
   const [carrierId, setCarrierId]     = useState<CarrierId>("aaa");
   const [email, setEmail]             = useState("");
   const [password, setPassword]       = useState("");
+  const [zipCode, setZipCode]         = useState("");
   const [mfaCode, setMfaCode]         = useState("");
   const [sessionId, setSessionId]     = useState<string | null>(null);
   const [session, setSession]         = useState<CarrierSession | null>(null);
@@ -120,6 +124,7 @@ export default function Page() {
 
   const startPolling = useCallback((sid: string) => {
     stopPolling();
+    pollSession(sid);
     pollRef.current = setInterval(() => pollSession(sid), POLL_INTERVAL_MS);
   }, [pollSession, stopPolling]);
 
@@ -137,6 +142,7 @@ export default function Page() {
 
     const credentials: Record<string, string> = { email };
     if (carrier.needsPassword) credentials.password = password;
+    if (carrier.needsZipCode && zipCode) credentials.zipCode = zipCode;
 
     try {
       const res  = await fetch("/api/carriers/run", {
@@ -270,6 +276,25 @@ export default function Page() {
                   required
                   style={styles.input}
                   autoComplete="current-password"
+                />
+              </label>
+            )}
+
+            {/* Zip Code — for carriers that require it */}
+            {carrier.needsZipCode && (
+              <label style={styles.label}>
+                Zip Code
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="\d{5}"
+                  maxLength={5}
+                  value={zipCode}
+                  onChange={(e) => setZipCode(e.target.value.replace(/\D/g, ""))}
+                  placeholder="94510"
+                  required
+                  style={styles.input}
+                  autoComplete="postal-code"
                 />
               </label>
             )}
@@ -415,6 +440,7 @@ export default function Page() {
               setSessionId(null);
               setEmail("");
               setPassword("");
+              setZipCode("");
               setMfaCode("");
               setFormError(null);
             }}

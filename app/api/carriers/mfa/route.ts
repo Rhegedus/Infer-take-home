@@ -66,6 +66,9 @@ export async function POST(req: NextRequest) {
   }
 
   await store.submitMfa(sessionId, code);
+  await store.transition(sessionId, CarrierState.MFA_SUBMITTED, {
+    statusMessage: "Verifying code...",
+  });
 
   return NextResponse.json({ ok: true, sessionId });
 }

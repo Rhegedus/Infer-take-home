@@ -48,7 +48,14 @@ export class SessionStore {
    */
   async patchStatus(sessionId: string, statusMessage: string): Promise<void> {
     const session = await this.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      console.log(`[SessionStore][${sessionId}] patchStatus failed: session not found`);
+      return;
+    }
+
+    console.log(
+      `[SessionStore][${sessionId}] patchStatus: "${session.statusMessage}" -> "${statusMessage}" (state: ${session.state})`
+    );
 
     await this.redis.set(
       this.sessionKey(sessionId),
@@ -68,6 +75,23 @@ export class SessionStore {
   ): Promise<CarrierSession> {
     const session = await this.get(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+    console.log(
+      `[SessionStore][${sessionId}] transition attempt: ${session.state} -> ${nextState}`
+    );
+
+    if (session.state === nextState) {
+      console.log(
+        `[SessionStore][${sessionId}] transition act as patch for self-transition: ${session.state} -> ${nextState}`
+      );
+      const updated: CarrierSession = {
+        ...session,
+        ...patch,
+        updatedAt: Date.now(),
+      };
+      await this.redis.set(this.sessionKey(sessionId), updated, { ex: this.ttlSec });
+      return updated;
+    }
 
     const allowed = VALID_TRANSITIONS[session.state];
     if (!allowed.includes(nextState)) {
@@ -89,6 +113,10 @@ export class SessionStore {
       { ex: this.ttlSec }
     );
 
+    console.log(
+      `[SessionStore][${sessionId}] transition success: ${session.state} -> ${nextState} (status: "${updated.statusMessage}")`
+    );
+
     return updated;
   }
 
@@ -99,6 +127,7 @@ export class SessionStore {
    * Called externally (e.g. from an API route) when the user submits their token.
    */
   async submitMfa(sessionId: string, code: string, ttlSec = 120): Promise<void> {
+    console.log(`[SessionStore][${sessionId}] submitMfa code: ${code}`);
     await this.redis.set(this.mfaKey(sessionId), code, { ex: ttlSec });
   }
 
@@ -106,6 +135,10 @@ export class SessionStore {
    * Consume (GETDEL) the MFA code — ensures it is used exactly once.
    */
   async consumeMfa(sessionId: string): Promise<string | null> {
-    return this.redis.getdel<string>(this.mfaKey(sessionId));
+    const code = await this.redis.getdel<string>(this.mfaKey(sessionId));
+    if (code) {
+      console.log(`[SessionStore][${sessionId}] consumeMfa success, code found`);
+    }
+    return code;
   }
 }

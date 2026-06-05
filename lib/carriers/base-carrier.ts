@@ -90,8 +90,39 @@ export abstract class BaseCarrier {
   async run(sessionId: string, credentials: Record<string, string>): Promise<DocumentResult> {
     try {
       return await this.execute(sessionId, credentials);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    } catch (err: any) {
+      let message = "Unknown error";
+      if (err instanceof Error) {
+        message = err.message;
+      } else if (err && typeof err === "object") {
+        message = err.message || (err.error && err.error.message) || String(err.error || err);
+      } else {
+        message = String(err);
+      }
+
+      // If we still got [object Object], it might be a weird ws ErrorEvent
+      if (message === "[object Object]") {
+        try {
+          message = JSON.stringify(err);
+        } catch {}
+        // hardcode fallback if it's the known 429 ErrorEvent
+        if (err.type === "error" && err.error) {
+          message = String(err.error);
+        }
+      }
+      if (this.browser) {
+        try {
+          const pages = await this.browser.pages();
+          const activePage = pages.find((p) => !p.isClosed()) || pages[0];
+          if (activePage) {
+            const screenshotPath = `/Users/robert/Documents/GitHub/infer-fde-takehome/error-${sessionId}.png`;
+            await activePage.screenshot({ path: screenshotPath });
+            console.log(`[BaseCarrier] Saved error screenshot to ${screenshotPath}`);
+          }
+        } catch (screenshotErr) {
+          console.error("[BaseCarrier] Failed to save error screenshot:", screenshotErr);
+        }
+      }
       await this.failSession(sessionId, message);
       throw err;
     } finally {
@@ -249,11 +280,39 @@ export abstract class BaseCarrier {
   // ─── Browser Lifecycle ────────────────────────────────────────────────────────
 
   protected async openBrowser(): Promise<Page> {
-    const wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
+    if (process.env.USE_LOCAL_BROWSER === "true") {
+      this.browser = await puppeteer.launch({
+        headless: false,
+        executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      });
+    } else {
+      const wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
+      
+      let attempts = 0;
+      const maxAttempts = 3;
+      while (attempts < maxAttempts) {
+        try {
+          this.browser = await puppeteer.connect({
+            browserWSEndpoint: wsEndpoint,
+          });
+          break; // Connected successfully
+        } catch (err: any) {
+          attempts++;
+          let errMsg = err?.message || err?.error?.message || String(err);
+          if (errMsg === "[object Object]" && err?.error) errMsg = String(err.error);
+          
+          if (attempts >= maxAttempts) {
+            throw new Error(`Failed to connect to Browserless after ${maxAttempts} attempts. Last error: ${errMsg}`);
+          }
+          await this.progress(`Browser busy (429). Retrying in ${attempts * 2}s...`);
+          await new Promise(r => setTimeout(r, attempts * 2000));
+        }
+      }
+    }
 
-    this.browser = await puppeteer.connect({
-      browserWSEndpoint: wsEndpoint,
-    });
+    if (!this.browser) {
+      throw new Error("Failed to initialize browser");
+    }
 
     const page = await this.browser.newPage();
 
@@ -309,6 +368,14 @@ export abstract class BaseCarrier {
     if (!sessionId) return;
     this.log(sessionId, message);
     await this.store.patchStatus(sessionId, message);
+    await this.debugPause(message);
+  }
+
+  /** Pause execution during debug run if global.DEBUG_PAUSE is registered. */
+  protected async debugPause(message: string): Promise<void> {
+    if (typeof (global as any).DEBUG_PAUSE === "function") {
+      await (global as any).DEBUG_PAUSE(message);
+    }
   }
 
   // ─── Abstract Interface ───────────────────────────────────────────────────────

@@ -243,63 +243,115 @@ export class LemonadeCarrier extends BaseCarrier {
     await LemonadeCarrier.dismissCookieBanner(page);
 
     await this.progress("Opening policy declarations page…");
-    const browser = page.browser();
-    const policyPage = await Promise.all([
-      LemonadeCarrier.waitForPolicyTab(browser, NAV_TIMEOUT),
-      page.click(SELECTORS.policyCard),
-    ]).then(([tab]) => tab);
 
-    await policyPage
-      .waitForFunction(
-        () => document.readyState === "complete",
-        { timeout: DOM_TIMEOUT }
-      )
-      .catch(() => {});
+    // Intercept window.open so we can capture the URL the policy card would
+    // open in a new tab, then navigate the MAIN page there instead.
+    //
+    // Browserless assigns a very short lifetime to popup/child tabs — they are
+    // often reaped before Page.printToPDF can finish. By staying on the primary
+    // session page we avoid that problem entirely.
+    let capturedPolicyUrl: string | null = null;
+    await page.exposeFunction("__lmndCaptureOpen", (url: string) => {
+      capturedPolicyUrl = url;
+    });
+    await page.evaluate(() => {
+      window.open = (url?: string | URL) => {
+        if (url) (window as any).__lmndCaptureOpen(url.toString());
+        return null;
+      };
+    });
 
-    const policyUrl = policyPage.url();
-    if (!LEMONADE_POLICY_URL_PATTERN.test(policyUrl)) {
-      throw new Error(
-        `LemonadeCarrier: Unexpected URL in new tab: ${policyUrl}`
-      );
+    await page.click(SELECTORS.policyCard);
+
+    // Give the click handler up to 5 s to call window.open
+    const openDeadline = Date.now() + 5_000;
+    while (!capturedPolicyUrl && Date.now() < openDeadline) {
+      await new Promise(r => setTimeout(r, 200));
     }
 
+    if (!capturedPolicyUrl) {
+      throw new Error("LemonadeCarrier: window.open did not fire — no URL captured within 5s");
+    }
+
+    // Lemonade calls window.open with a relative path like "/policy/LP4C963AC88".
+    // Resolve it to the absolute me.lemonade.com URL before navigating.
+    const rawUrl = capturedPolicyUrl as string;
+    const policyUrl = rawUrl.startsWith("/")
+      ? `https://me.lemonade.com${rawUrl}`
+      : rawUrl;
+
+    if (!LEMONADE_POLICY_URL_PATTERN.test(policyUrl)) {
+      throw new Error(
+        `LemonadeCarrier: Unexpected policy URL: ${policyUrl}`
+      );
+    }
     const policyId = policyUrl.split("/policy/")[1]?.split("?")[0] ?? "unknown";
 
-    await this.progress(
-      policyId !== "unknown"
-        ? `Loading policy ${policyId}…`
-        : "Loading policy page…"
-    );
+    await this.progress("Loading policy declarations page…");
 
-    await policyPage
+    // Navigate the main page (primary Browserless session) directly to the policy URL.
+    await page.goto(policyUrl, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+
+    // Wait for the policy page to finish rendering (SPA data-loading guard).
+    await page
       .waitForFunction(
         () => !document.querySelector('[data-loading="true"]'),
         { timeout: DOM_TIMEOUT }
       )
       .catch(() => {});
 
-    await this.progress("Preparing policy page for download…");
-    await LemonadeCarrier.preparePolicyPageForPdf(policyPage);
+    await this.progress("Finding policy download link…");
 
-    await this.progress("Capturing policy PDF…");
-    const pdfBytes = await policyPage.pdf({
-      format: "Letter",
-      printBackground: true,
-      margin: { top: "0.5in", right: "0.5in", bottom: "0.5in", left: "0.5in" },
-      displayHeaderFooter: false,
+    // Lemonade renders an <a download href="https://icebox.lemonade.com/tokens/…">
+    // link on the policy page. That URL is a signed token that returns the raw PDF
+    // directly — far more reliable than Page.printToPDF against a live SPA.
+    const downloadHref = await page.evaluate(() => {
+      const anchor = document.querySelector<HTMLAnchorElement>("a[download][href]");
+      return anchor?.href ?? null;
     });
 
-    await policyPage.close();
+    if (!downloadHref || !downloadHref.includes("icebox.lemonade.com")) {
+      throw new Error(
+        `LemonadeCarrier: Could not find signed download link on policy page (found: ${downloadHref ?? "nothing"})`
+      );
+    }
+
+    await this.progress("Downloading policy PDF…");
+
+    // icebox.lemonade.com blocks cross-origin fetch() from the browser (CORS).
+    // Instead, extract the browser's cookies and make the request from Node.js,
+    // which has no CORS restrictions.
+    const allCookies = await page.cookies();
+    const cookieHeader = allCookies.map(c => `${c.name}=${c.value}`).join("; ");
+
+    const pdfResponse = await fetch(downloadHref, {
+      headers: {
+        "Cookie":     cookieHeader,
+        "User-Agent": await page.evaluate(() => navigator.userAgent),
+        "Referer":    policyUrl,
+      },
+      redirect: "follow",
+    });
+
+    if (!pdfResponse.ok) {
+      throw new Error(
+        `LemonadeCarrier: Download request failed — ${pdfResponse.status} ${pdfResponse.statusText}`
+      );
+    }
+
+    const pdfData = Buffer.from(await pdfResponse.arrayBuffer());
 
     return [
       {
-        type: "DECLARATIONS",
+        type:     "DECLARATIONS",
         filename: `lemonade-policy-${policyId}.pdf`,
         mimeType: "application/pdf",
-        data: Buffer.from(pdfBytes),
+        data:     pdfData,
       },
     ];
   }
+
+
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -369,8 +421,9 @@ export class LemonadeCarrier extends BaseCarrier {
           text
         );
 
-      const removeSubtree = (root: Element) => {
-        root.remove();
+      const hideSubtree = (root: HTMLElement) => {
+        root.style.display = "none";
+        root.style.visibility = "hidden";
       };
 
       // Walk headings first — Lemonade's banner is anchored on "lemonade and cookies".
@@ -386,7 +439,7 @@ export class LemonadeCarrier extends BaseCarrier {
             node.getAttribute("role") === "dialog" ||
             depth >= 8
           ) {
-            removeSubtree(node);
+            hideSubtree(node);
             break;
           }
           el = el.parentElement;
@@ -403,7 +456,7 @@ export class LemonadeCarrier extends BaseCarrier {
       ];
       for (const sel of cmpSelectors) {
         try {
-          document.querySelectorAll(sel).forEach((n) => removeSubtree(n));
+          document.querySelectorAll(sel).forEach((n) => hideSubtree(n as HTMLElement));
         } catch {
           /* invalid selector in older engines */
         }
@@ -416,7 +469,7 @@ export class LemonadeCarrier extends BaseCarrier {
         if (style.position !== "fixed" && style.position !== "sticky") return;
         const text = html.innerText ?? "";
         if (text.length > 4_000) return;
-        if (isCookieText(text)) removeSubtree(html);
+        if (isCookieText(text)) hideSubtree(html);
       });
     });
 
@@ -445,25 +498,7 @@ export class LemonadeCarrier extends BaseCarrier {
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  private static async waitForPolicyTab(
-    browser: Browser,
-    timeoutMs: number
-  ): Promise<Page> {
-    const deadline = Date.now() + timeoutMs;
 
-    while (Date.now() < deadline) {
-      for (const tab of await browser.pages()) {
-        if (tab.isClosed()) continue;
-        const url = tab.url();
-        if (LEMONADE_POLICY_URL_PATTERN.test(url)) return tab;
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-
-    throw new Error(
-      "LemonadeCarrier: Timed out waiting for me.lemonade.com/policy tab"
-    );
-  }
 
   private static extractEmail(credentials: Record<string, string>): string {
     if (!credentials.email) {
