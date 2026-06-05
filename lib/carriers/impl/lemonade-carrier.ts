@@ -278,17 +278,47 @@ export class LemonadeCarrier extends BaseCarrier {
       };
     });
 
-    await page.click(SELECTORS.policyCard);
+    try {
+      await page.click(SELECTORS.policyCard);
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("closed");
+      if (!isDetached) {
+        throw err;
+      }
+      console.log("[lemonade] page.click policyCard threw page navigation/detachment error. Proceeding to check URL...");
+    }
 
-    // Give the click handler up to 5s to call window.open
+    // Give the click handler up to 5s to call window.open or navigate the page
     let capturedPolicyUrl: string | null = null;
     const openDeadline = Date.now() + 5_000;
     while (Date.now() < openDeadline) {
-      capturedPolicyUrl = await page.evaluate(() => (window as any).__capturedPolicyUrl);
-      if (capturedPolicyUrl) {
-        break;
+      // First check if the page itself has already navigated to the policy page
+      try {
+        const currentUrl = page.url();
+        if (LEMONADE_POLICY_URL_PATTERN.test(currentUrl)) {
+          console.log(`[lemonade] Detected page has already navigated to: ${currentUrl}`);
+          capturedPolicyUrl = currentUrl;
+          break;
+        }
+      } catch {}
+
+      // If not navigated, check if we intercepted window.open URL
+      try {
+        capturedPolicyUrl = await page.evaluate(() => (window as any).__capturedPolicyUrl);
+        if (capturedPolicyUrl) {
+          break;
+        }
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        const isDetached = msg.includes("detached") || msg.includes("Frame") || msg.includes("closed");
+        if (!isDetached) {
+          throw err;
+        }
+        // If it's a detached frame error, it means the page is actively navigating/reloading.
+        // We'll sleep and check the URL in the next loop.
       }
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 250));
     }
 
     if (!capturedPolicyUrl) {
