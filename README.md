@@ -50,3 +50,27 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to view the UI.
+
+---
+
+## 🐳 Docker & Private Server Deployment
+
+To run this application locally without Browserless.io (avoiding the 60-second Free Tier limit), you can run it inside a Docker container. This bundles a headless Chromium instance directly inside the container environment.
+
+1. Build the container:
+   ```bash
+   docker compose build
+   ```
+2. Start the services:
+   ```bash
+   docker compose up
+   ```
+
+For detailed setup, hosting, and deployment instructions on a **Raspberry Pi**, see the **[DOCKER.md](file:///Users/robert/Documents/GitHub/infer-fde-takehome/DOCKER.md)** guide.
+
+---
+
+## 📖 Walkthroughs & Technical Retrospectives
+
+* **[walkthrough.md](file:///Users/robert/Documents/GitHub/infer-fde-takehome/walkthrough.md)**: High-level overview of our stabilization fixes, DOM selectors, and verified execution logs.
+* **[Challanges_faced.md](file:///Users/robert/Documents/GitHub/infer-fde-takehome/Challanges_faced.md)**: System retrospective discussing serverless execution freezes, singleton hazards, and free-tier limits.
