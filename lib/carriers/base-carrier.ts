@@ -288,9 +288,17 @@ export abstract class BaseCarrier {
 
   protected async openBrowser(): Promise<Page> {
     if (process.env.USE_LOCAL_BROWSER === "true") {
+      const isHeadless = process.env.PUPPETEER_HEADLESS === "true";
+      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+      
       this.browser = await puppeteer.launch({
-        headless: false,
-        executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        headless: isHeadless ? true : false,
+        executablePath,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage"
+        ]
       });
     } else {
       let wsEndpoint = browserlessWsWithLaunch(this.config.browserlessWsEndpoint);
