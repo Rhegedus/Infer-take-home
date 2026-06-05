@@ -2,6 +2,25 @@
 
 We have successfully stabilized the extraction flow for both carriers (AAA and Lemonade) to run reliably under local development and remote serverless environments.
 
+---
+
+## 🛠️ Our Debugging & Engineering Process
+
+During this pairing session, we approached debugging systematically to stabilize these complex, stateful browser automation pipelines:
+
+1. **Production Log Analysis**:
+   - We analyzed the Next.js and Vercel execution logs to pinpoint the exact locations of failures (such as frame detachments during routing, singleton state conflicts, and Browserless connection teardowns).
+2. **Local Visual Replication**:
+   - Headless scraping in remote cloud environments (Browserless) runs "blind," making layout blockers hard to identify.
+   - We configured a local visual debugging mode (`USE_LOCAL_BROWSER=true`). By running Chrome in a visible window, we immediately caught DOM events in real-time, such as the AAA "Continue to my AAA club" interstitial modal and Lemonade's fast routing redirects.
+3. **Environment-Specific Diagnostics**:
+   - We isolated local codebase bugs from third-party API constraints. For example, we identified that the Browserless Free Tier enforces a strict 60-second connection timeout, helping us pivot from diagnosing code errors to designing container-parity alternatives.
+4. **Surgical Refactoring & Validation**:
+   - Implemented self-healing patterns (try/catch retry blocks around frame transitions, using in-page window variables instead of heavy DevTools protocol script injections).
+   - Validated compilation safety locally (`npx tsc --noEmit` and production builds) before deploying clean histories directly to production.
+
+---
+
 ## Changes Made
 
 ### 🚗 [aaa-carrier.ts](file:///Users/robert/Documents/GitHub/infer-fde-takehome/lib/carriers/impl/aaa-carrier.ts)
