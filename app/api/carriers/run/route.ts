@@ -1,8 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { Redis } from "@upstash/redis";
 import { AaaCarrier } from "@/lib/carriers/impl/aaa-carrier";
 import { LemonadeCarrier } from "@/lib/carriers/impl/lemonade-carrier";
 import { BaseCarrier } from "@/lib/carriers/base-carrier";
+
+export const maxDuration = 300; // Allow execution up to 5 minutes on Vercel
 
 const redis = Redis.fromEnv();
 const WS    = process.env.BROWSERLESS_WS_ENDPOINT ?? "";
@@ -62,7 +64,16 @@ export async function POST(req: NextRequest) {
   // start() writes INITIALIZED to Redis, fires the pipeline in the background,
   // and returns the sessionId before any browser work begins.
   // This maintains your existing, stable session lifecycle.
-  const sessionId = await carrier.start(credentials);
+  const { sessionId, promise } = await carrier.start(credentials);
+
+  // Keep the Vercel context alive until the background browser execution completes.
+  after(async () => {
+    try {
+      await promise;
+    } catch (err) {
+      console.error(`[after][${sessionId}] background job failed:`, err);
+    }
+  });
 
   return NextResponse.json({ ok: true, sessionId }, { status: 202 });
 }

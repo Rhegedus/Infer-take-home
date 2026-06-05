@@ -61,7 +61,9 @@ export abstract class BaseCarrier {
    * before any browser work begins — the frontend polls
    * GET /api/carriers/mfa?sessionId=… for state updates.
    */
-  async start(credentials: Record<string, string>): Promise<string> {
+  async start(
+    credentials: Record<string, string>
+  ): Promise<{ sessionId: string; promise: Promise<any> }> {
     const sessionId = randomUUID();
 
     const session: CarrierSession = {
@@ -76,11 +78,11 @@ export abstract class BaseCarrier {
     this.log(sessionId, "Session created");
 
     // Run the extraction pipeline asynchronously; errors are captured into Redis.
-    this.run(sessionId, credentials).catch((err) => {
+    const promise = this.run(sessionId, credentials).catch((err) => {
       console.error(`[${this.carrierId}][${sessionId}] Fatal:`, err);
     });
 
-    return sessionId;
+    return { sessionId, promise };
   }
 
   /**

@@ -76,3 +76,17 @@ When running headless in a remote container, debugging a hanging flow is extreme
 * **The Challenge**: The AAA flow was hanging at the interstitial dialog step, but console logs only showed `Waiting for policies dashboard to render...` without indicating why the page was stuck.
 * **The Solution**: We enabled a visual debugging mode using `USE_LOCAL_BROWSER=true npm run dev` locally. This launched a physical Chromium browser window on the local machine instead of offloading to Browserless. 
 * By observing the page in real-time, we immediately saw the "Continue to my AAA club" popup window overlaying the policies dashboard, allowing us to capture the button selector (`[data-testid="continue-to-club-button"]`) and programmatically dismiss it.
+
+---
+
+## 🌐 6. Vercel / Serverless Environment Execution Freeze
+
+### The Challenge
+On Vercel, serverless function instances are immediately frozen or suspended as soon as the HTTP handler returns a response. When `/api/carriers/run` returned `{ ok: true, sessionId }` immediately (which is needed to let the frontend start polling and not time out the HTTP request), the background promise running the browser extraction (`this.run(...)`) was immediately suspended. This caused the session to hang in `INITIALIZED` state indefinitely on Vercel with zero logs or output.
+
+### The Solution
+* We updated `BaseCarrier.start()` to return both the `sessionId` and the background extraction `promise`.
+* In `app/api/carriers/run/route.ts`, we imported Next.js's native **`after`** API.
+* We wrapped the background extraction promise inside `after()`. This explicitly registers the task with the Next.js runtime, ensuring Vercel keeps the execution context alive and active after sending the response to the client.
+* We also exported `maxDuration = 300` in the route handler to configure Vercel's timeout limit to 5 minutes to accommodate the full extraction flow.
+
