@@ -90,3 +90,4 @@ On Vercel, serverless function instances are immediately frozen or suspended as 
 * We wrapped the background extraction promise inside `after()`. This explicitly registers the task with the Next.js runtime, ensuring Vercel keeps the execution context alive and active after sending the response to the client.
 * We also exported `maxDuration = 300` in the route handler to configure Vercel's timeout limit to 5 minutes to accommodate the full extraction flow.
 
+.
