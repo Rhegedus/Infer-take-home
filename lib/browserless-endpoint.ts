@@ -8,12 +8,6 @@ export function browserlessWsWithLaunch(
   launch: Record<string, unknown> = {}
 ): string {
   const url = new URL(endpoint);
-  
-  // Add a default timeout of 5 minutes (300000ms) to keep the Browserless session alive.
-  if (!url.searchParams.has("timeout")) {
-    url.searchParams.set("timeout", "300000");
-  }
-
   const prior = url.searchParams.get("launch");
 
   let merged: Record<string, unknown> = {

@@ -105,4 +105,4 @@ When running in production/Vercel, the browser connection to Browserless.io woul
 
 ### The Solution
 * **Heartbeat Ping**: We updated the `awaitMfaCode` polling loop to execute `await this.browser.version()` on every iteration. This sends a lightweight command over the WebSocket connection, acting as a heartbeat that prevents idle timeouts.
-* **Explicit Session Timeout**: We updated `browserlessWsWithLaunch` to automatically append `&timeout=300000` (5 minutes) to the Browserless connection string if it is not already specified, matching our Next.js execution budget.
+* **Configurable Session Timeout**: We avoided hardcoding a default `&timeout=300000` (5 minutes) query parameter in code. Hardcoding it causes Browserless to reject the connection with a `400 Bad Request` if the user is on the Free plan (which has a strict 60-second limit). Instead, we let users configure the `timeout` parameter manually by appending `&timeout=300000` to their `BROWSERLESS_WS_ENDPOINT` environment variable on Vercel if their billing plan supports it.
