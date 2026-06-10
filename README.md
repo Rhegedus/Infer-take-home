@@ -3,7 +3,9 @@
 A production-ready, serverless-first web application designed to securely authenticate, navigate MFA, and extract policy declaration documents from personal lines insurance carriers.
 
 **Watch the Demo:** https://www.loom.com/share/44de9cdb61e8407797595b93ba1e587c
+
 **Demo:** https://demo-infer.rhegedus.com
+
 **Claude Session Transcripts:** https://claude.ai/share/0ee23fcf-7fe1-4887-aa6e-464ffec4d129
 
 ## 🏗️ Architecture & System Design
